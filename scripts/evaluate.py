@@ -19,9 +19,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from qvio import euroc, metrics  # noqa: E402
+from qvio import euroc, metrics, so3  # noqa: E402
 
-ORDER = ["openvins", "msckf", "msckf-gru-noise", "gru-preflight", "gru-filter"]
+ORDER = ["openvins", "msckf", "msckf-gru-noise", "gru-preflight", "gru-filter",
+         "msckf-speed-prior", "gru-velocity", "gru-both"]
+# Variants drawn in the outage figures.
+OUTAGE_PLOT = ["msckf", "gru-filter", "msckf-speed-prior", "gru-velocity", "gru-both"]
 
 
 def markdown(df: pd.DataFrame, index: bool = False, digits: int = 4) -> str:
@@ -78,7 +81,7 @@ def main() -> None:
     runs = list(load_runs(Path(args.runs)))
     if args.openvins:
         runs += list(load_openvins(Path(args.openvins).expanduser()))
-    gts, full, outages = {}, [], []
+    gts, full, outages, outage_runs = {}, [], [], []
     for variant, outage, name, run in runs:
         gt = gts.setdefault(name, euroc.load_groundtruth(args.euroc, name))
         try:
@@ -92,6 +95,12 @@ def main() -> None:
                 for row in metrics.evaluate_outages(run, gt):
                     row.update(variant=variant, sequence=name, split=split_of(name), outage_s=outage)
                     outages.append(row)
+                # The whole flight with its outages, which also shows whether
+                # the filter recovered in between.
+                whole = metrics.evaluate_run(run, gt)
+                outage_runs.append({"variant": variant, "sequence": name, "split": split_of(name),
+                                    "outage_s": outage, "ate_rmse_m": whole["ate_rmse_m"],
+                                    "attitude_rmse_deg": whole["attitude_rmse_deg"]})
         except Exception as e:  # one bad run should not hide the others
             print(f"could not score {variant} {name} (outage {outage:g} s): {e}")
 
@@ -123,10 +132,18 @@ def main() -> None:
                       rotation_median_deg=("rotation_drift_deg", "median"),
                       tilt_after_median_deg=("tilt_after_deg", "median"))
                  .reset_index())
+        whole = (pd.DataFrame(outage_runs).groupby(["split", "outage_s", "variant"])
+                 [["ate_rmse_m", "attitude_rmse_deg"]].mean()
+                 .rename(columns=lambda c: f"flight_{c}").reset_index())
+        stats = stats.merge(whole, on=["split", "outage_s", "variant"], how="left")
+        stats["variant"] = pd.Categorical(stats["variant"], [v for v in ORDER if v in set(stats["variant"])])
+        stats = stats.sort_values(["split", "outage_s", "variant"])
+        pd.DataFrame(outage_runs).to_csv(out / "outage_flights.csv", index=False)
         stats.to_csv(out / "outages_summary.csv", index=False)
         (out / "outages_summary.md").write_text(markdown(stats))
         print(stats.to_string(index=False))
         plot_outages(df, out)
+        plot_outage_trajectories(args.euroc, Path(args.runs), out)
 
 
 def plot_trajectories(root: str, runs: Path, out: Path) -> None:
@@ -170,7 +187,7 @@ def plot_outages(df: pd.DataFrame, out: Path) -> None:
     test = df[df["split"] == "test"]
     if test.empty:
         return
-    variants = [v for v in ORDER if v in set(test["variant"])]
+    variants = [v for v in OUTAGE_PLOT if v in set(test["variant"])]
     durations = sorted(test["outage_s"].unique())
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
     for ax, column, label in ((axes[0], "translation_drift_m", "translation drift [m]"),
@@ -185,10 +202,53 @@ def plot_outages(df: pd.DataFrame, out: Path) -> None:
         ax.set_xticks(range(len(durations)), [f"{d:g} s" for d in durations])
         ax.set_xlabel("camera outage")
         ax.set_ylabel(label)
+        ax.set_yscale("log")
     axes[0].legend(fontsize=8)
     fig.suptitle("Drift during camera outages, V2 sequences")
     fig.tight_layout()
     fig.savefig(out / "outages_v2.png", dpi=130)
+    plt.close(fig)
+
+
+def plot_outage_trajectories(root: str, runs: Path, out: Path, outage_s: float = 10.0) -> None:
+    """Top view of the V2 flights with long outages, without and with the velocity GRU."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    tag = f"_outage{outage_s:g}s"
+    pairs = (("msckf", "tab:blue"), ("gru-velocity", "tab:red"))
+    names = [n for n in euroc.TEST if all((runs / f"{v}{tag}" / f"{n}.npz").is_file() for v, _ in pairs)]
+    if not names:
+        return
+    fig, axes = plt.subplots(1, len(names), figsize=(4.2 * len(names), 4.4))
+    for ax, name in zip(np.atleast_1d(axes), names):
+        gt = euroc.load_groundtruth(root, name)
+        ax.plot(gt.p[:, 0], gt.p[:, 1], color="0.6", lw=2.5, label="ground truth")
+        for variant, color in pairs:
+            run = dict(np.load(runs / f"{variant}{tag}" / f"{name}.npz"))
+            keep, p_gt, R_gt, _ = metrics.interpolate_groundtruth(gt, run["t"])
+            # Aligned on the first pose, as a pilot would see it: with an
+            # alignment over the whole flight a drifting run looks better
+            # than it is.
+            R0 = np.asarray(so3.quat_to_rot(run["q"][keep][0]))
+            Rz, tz = metrics.align_first_pose(R0, run["p"][keep][0], R_gt[0], p_gt[0])
+            p = run["p"][keep] @ Rz.T + tz
+            hidden = run["hidden"][keep]
+            ax.plot(p[:, 0], p[:, 1], color=color, lw=1, label=variant)
+            ax.plot(np.where(hidden, p[:, 0], np.nan), np.where(hidden, p[:, 1], np.nan),
+                    color=color, lw=2.5, alpha=0.5)
+        ax.set_title(name)
+        ax.set_aspect("equal")
+        ax.set_xlim(gt.p[:, 0].min() - 2, gt.p[:, 0].max() + 2)
+        ax.set_ylim(gt.p[:, 1].min() - 2, gt.p[:, 1].max() + 2)
+        ax.set_xlabel("x [m]")
+    np.atleast_1d(axes)[0].set_ylabel("y [m]")
+    np.atleast_1d(axes)[0].legend(loc="best", fontsize=8)
+    fig.suptitle(f"V2 with the camera off for {outage_s:g} s every {2 * outage_s:g} s (thick: camera off)")
+    fig.tight_layout()
+    fig.savefig(out / f"outage_trajectories_{outage_s:g}s_v2.png", dpi=130)
     plt.close(fig)
 
 

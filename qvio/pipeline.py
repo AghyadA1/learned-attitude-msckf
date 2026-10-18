@@ -110,41 +110,83 @@ def cached_frames(seq: Sequence, cache_path=None, config: TrackerConfig = Tracke
     return frames
 
 
-def run(seq: Sequence, frames: list[Frame], config: FilterConfig = FilterConfig(),
-        gyro_model=None, outages: list[tuple[int, int]] | None = None,
-        tracker_config: TrackerConfig = TrackerConfig(), progress=None) -> dict:
-    """Run the filter and return the estimated states at every camera time.
+def outage_frames(seq: Sequence, outages: list[tuple[int, int]],
+                  config: TrackerConfig = TrackerConfig(), progress=None) -> list[Frame]:
+    """Re-run the tracker on the images with the camera switched off.
 
-    ``frames`` are the cached tracks. With ``outages`` the tracker is re-run
-    on the images instead, skipping the hidden frames and restarting after
-    each gap, so no track ever crosses an outage.
+    Hidden frames come back empty and the tracker restarts after each gap,
+    so no track ever crosses an outage.
     """
-    start = find_static_start(seq, frames)
-    f = MSCKF(seq.camera, seq.noise, config, gyro_model)
-    f.initialize(start.t, start.R, start.bg)
+    hidden = hidden_frames(seq, outages)
+    tracker = KLTTracker(seq.camera, config)
+    frames = []
+    for k, t in enumerate(seq.cam_t):
+        if hidden[k]:
+            if k == 0 or not hidden[k - 1]:
+                tracker.reset()
+            frames.append(Frame(int(t), np.empty(0, np.int64), np.empty((0, 2)), np.empty((0, 2))))
+        else:
+            frames.append(tracker.track(seq.image(k), int(t)))
+        if progress is not None:
+            progress(k, len(seq.cam_t))
+    return frames
 
-    outages = outages or []
+
+def _velocity_prediction(f: MSCKF, seq: Sequence, t: int, model):
+    i1 = int(np.searchsorted(seq.imu_t, t, side="right"))
+    i0 = i1 - model.window
+    if i0 < 0:
+        return None, None
+    return model.predict(seq.imu_t[i0:i1], seq.gyro[i0:i1], seq.accel[i0:i1], f.R, f.bg, f.ba)
+
+
+def hidden_frames(seq: Sequence, outages: list[tuple[int, int]]) -> np.ndarray:
     hidden = np.zeros(len(seq.cam_t), bool)
     for a, b in outages:
         hidden |= (seq.cam_t >= a) & (seq.cam_t < b)
-    tracker = KLTTracker(seq.camera, tracker_config) if outages else None
+    return hidden
+
+
+def run(seq: Sequence, frames: list[Frame], config: FilterConfig = FilterConfig(),
+        gyro_model=None, outages: list[tuple[int, int]] | None = None,
+        start: StaticStart | None = None, velocity_model=None, velocity_every: int = 10,
+        progress=None) -> dict:
+    """Run the filter and return the estimated states at every camera time.
+
+    With ``outages`` the frames must come from :func:`outage_frames`, and
+    ``start`` from the uninterrupted tracks, since the camera is hidden only
+    after the filter has started. A ``velocity_model`` (see
+    ``qvio.velocity``) is applied every ``velocity_every`` frames while the
+    camera is off.
+    """
+    start = start or find_static_start(seq, frames)
+    f = MSCKF(seq.camera, seq.noise, config, gyro_model)
+    f.initialize(start.t, start.R, start.bg)
+    hidden = hidden_frames(seq, outages or [])
 
     still = True
     previous = frames[start.frame]
     out = {k: [] for k in ("t", "p", "q", "v", "bg", "ba", "P", "hidden", "accepted")}
     n = len(seq.cam_t)
+    since_velocity = 0
     for k in range(start.frame, n):
         t = int(seq.cam_t[k])
         if t > f.t:
             f.propagate(*_imu_samples(seq, f.t, t))
+        if hidden[k] and not hidden[k - 1]:
+            f.drop_tracks()
+            since_velocity = 0
+        if hidden[k] and velocity_model is not None:
+            since_velocity += 1
+            if since_velocity == velocity_every:
+                since_velocity = 0
+                v, var = _velocity_prediction(f, seq, t, velocity_model)
+                if v is not None:
+                    f.body_velocity_update(v, var)
         if hidden[k]:
-            if tracker is not None and not hidden[k - 1]:
-                tracker.reset()
-                f.drop_tracks()
             accepted = 0
         else:
-            frame = tracker.track(seq.image(k), t) if tracker is not None else frames[k]
-            stats = f.process_frame(t, frame.ids, frame.xy)
+            stats = f.process_frame(t, frames[k].ids, frames[k].xy)
             accepted = stats.accepted
             if still:
                 still = median_flow(previous, frames[k]) < 0.5

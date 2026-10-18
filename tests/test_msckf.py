@@ -5,6 +5,9 @@ import simulation as sim
 from qvio import metrics, pipeline
 from qvio.msckf import FilterConfig
 
+# The simulated IMU has exactly the sensor.yaml noise.
+SIM = FilterConfig(accel_noise_scale=1.0)
+
 
 @pytest.fixture(scope="module")
 def flight():
@@ -15,7 +18,7 @@ def flight():
 @pytest.fixture(scope="module")
 def result(flight):
     seq, frames, gt = flight
-    run = pipeline.run(seq, frames, FilterConfig())
+    run = pipeline.run(seq, frames, SIM)
     return run, metrics.evaluate_run(run, gt)
 
 
@@ -40,7 +43,7 @@ def test_filter_is_consistent():
     nees = []
     for seed in (10, 12, 13):
         seq, frames, gt = sim.as_sequence(sim.simulate(20.0, seed=seed, still_s=3.0))
-        m = metrics.evaluate_run(pipeline.run(seq, frames), gt)
+        m = metrics.evaluate_run(pipeline.run(seq, frames, SIM), gt)
         nees.append([m["nees_attitude"], m["nees_position"]])
     att, pos = np.mean(nees, axis=0)
     assert 1.0 < att < 6.0
@@ -69,6 +72,25 @@ class PerfectGyro:
 def test_gyro_model_hook_is_used():
     data = sim.simulate(15.0, seed=3, still_s=3.0)
     seq, frames, gt = sim.as_sequence(data)
-    plain = metrics.evaluate_run(pipeline.run(seq, frames), gt)
-    perfect = metrics.evaluate_run(pipeline.run(seq, frames, gyro_model=PerfectGyro(data)), gt)
+    plain = metrics.evaluate_run(pipeline.run(seq, frames, SIM), gt)
+    perfect = metrics.evaluate_run(pipeline.run(seq, frames, SIM, gyro_model=PerfectGyro(data)), gt)
     assert perfect["rpe_1s_deg"] < plain["rpe_1s_deg"]
+
+
+def test_body_velocity_jacobian(flight):
+    seq, _, _ = flight
+    from qvio import so3
+    from qvio.msckf import MSCKF
+
+    f = MSCKF(seq.camera, seq.noise)
+    rng = np.random.default_rng(0)
+    f.initialize(0, so3.exp(rng.normal(size=3)), np.zeros(3))
+    f.v = rng.normal(size=3)
+    vb = f.R.T @ f.v
+    d_theta, d_v = 1e-6 * rng.normal(size=3), 1e-6 * rng.normal(size=3)
+    moved = (f.R @ so3.exp(d_theta)).T @ (f.v + d_v)
+    predicted = vb + so3.skew(vb) @ d_theta + f.R.T @ d_v
+    np.testing.assert_allclose(moved, predicted, atol=1e-11)
+    # A near-perfect measurement moves the estimate onto it.
+    f.body_velocity_update(vb + 0.05, np.full(3, 1e-10))
+    np.testing.assert_allclose(f.R.T @ f.v, vb + 0.05, atol=5e-3)

@@ -12,6 +12,7 @@ set -euo pipefail
 EUROC=${1:?usage: bash scripts/reproduce.sh EUROC_DIR [OPENVINS_EXPORTS]}
 OPENVINS=${2:-}
 JOBS=${JOBS:-$(( $(nproc) > 1 ? $(nproc) / 2 : 1 ))}
+V1="V1_01_easy V1_02_medium V1_03_difficult"
 V2="V2_01_easy V2_02_medium V2_03_difficult"
 
 cd "$(dirname "$0")/.."
@@ -39,15 +40,35 @@ python scripts/train_gru.py calibrate --euroc "$EUROC" --checkpoint models/gru_f
 python scripts/train_gru.py compare --euroc "$EUROC" \
     original=models/gru_preflight.pt fine-tuned=models/gru_filter.pt
 
+step "velocity GRU"
+# The trained ensembles are in the repository; delete them to train them again.
+if [ ! -f models/velocity_gru.pt ]; then
+    python scripts/train_velocity.py train --euroc "$EUROC" --members 3 --out models/velocity_gru.pt
+fi
+if [ ! -f models/velocity_gru_mh.pt ]; then
+    python scripts/train_velocity.py train --euroc "$EUROC" --members 3 --out models/velocity_gru_mh.pt \
+        --sequences MH_01_easy MH_02_easy MH_03_medium MH_04_difficult
+fi
+python scripts/train_velocity.py evaluate --euroc "$EUROC" --checkpoint models/velocity_gru.pt
+
 step "MSCKF on all sequences ($JOBS parallel runs)"
 python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-gru-noise gru-preflight gru-filter --jobs "$JOBS"
 
 step "camera outages on V2"
+# The first pass over each outage length re-runs the tracker on the images.
 # shellcheck disable=SC2086
-python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-gru-noise gru-preflight gru-filter \
-    --sequences $V2 --outage 1 2 5 --jobs "$JOBS"
+python scripts/run_vio.py --euroc "$EUROC" \
+    --variant msckf msckf-gru-noise gru-preflight gru-filter msckf-speed-prior gru-velocity gru-both \
+    --sequences $V2 --outage 1 2 5 10 --jobs "$JOBS"
+
+step "velocity GRU in an unseen room"
+# Trained on the machine hall only, flown in the Vicon room.
+# shellcheck disable=SC2086
+python scripts/run_vio.py --euroc "$EUROC" --variant msckf gru-velocity --sequences $V1 \
+    --outage 5 10 --velocity-model models/velocity_gru_mh.pt --out runs/cross_room --jobs "$JOBS"
 
 step "scoring"
 python scripts/evaluate.py --euroc "$EUROC" ${OPENVINS:+--openvins "$OPENVINS"}
+python scripts/evaluate.py --euroc "$EUROC" --runs runs/cross_room --out results/cross_room
 
 step "done; tables are in results/, the full log in logs/reproduce.log"

@@ -1,0 +1,9 @@
+split,sequence,method,windows,rmse_x_m_s,rmse_y_m_s,rmse_z_m_s,rmse_m_s,mean_nees_per_axis
+val,MH_05_difficult,velocity GRU,1101,0.2577,0.3146,0.3398,0.5299,0.9974
+val,MH_05_difficult,zero velocity,1101,0.3725,0.7889,0.5908,1.0536,
+test,V2_01_easy,velocity GRU,1111,0.1739,0.2763,0.3704,0.4937,1.1679
+test,V2_01_easy,zero velocity,1111,0.1577,0.2081,0.2576,0.3668,
+test,V2_02_medium,velocity GRU,1145,0.3134,0.3993,0.5017,0.7137,1.5426
+test,V2_02_medium,zero velocity,1145,0.3886,0.4559,0.5692,0.8264,
+test,V2_03_difficult,velocity GRU,1139,0.3275,0.3317,0.5832,0.7466,1.5863
+test,V2_03_difficult,zero velocity,1139,0.3793,0.5142,0.5872,0.8678,

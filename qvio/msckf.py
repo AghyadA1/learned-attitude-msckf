@@ -45,9 +45,16 @@ class FilterConfig:
     max_reprojection_px: float = 3.0
     zupt_sigma_m_s: float = 0.01
     fej: bool = True
-    # Scale factors on the sensor.yaml noise densities.
+    # Scale factors on the sensor.yaml noise densities. In flight the
+    # accelerometer sees motor vibration and small timing and calibration
+    # errors that the datasheet value leaves out. With the datasheet value
+    # the filter trusts its velocity and accelerometer bias far too much:
+    # after a few seconds without the camera it could not pull a wrong
+    # velocity back, and it diverged on four of the eight training and
+    # validation sequences with 5 s outages. Seven times the datasheet value
+    # is the best of 1, 5, 7, 10 and 20 for ATE on those sequences.
     gyro_noise_scale: float = 1.0
-    accel_noise_scale: float = 1.0
+    accel_noise_scale: float = 7.0
     walk_noise_scale: float = 1.0
     # Initial standard deviations at the end of the stationary interval.
     init_tilt_sigma_deg: float = 1.0
@@ -384,6 +391,15 @@ class MSCKF:
             return False
         self._ekf_update(H, r, Rn)
         return True
+
+    def body_velocity_update(self, v_body: np.ndarray, variance: np.ndarray) -> None:
+        """Measurement of the velocity in the body frame, R^T v."""
+        vb = self.R.T @ self.v
+        H = np.zeros((3, self.dim))
+        # R^T v with R = R_hat Exp(dtheta) is R_hat^T v + [R_hat^T v]x dtheta.
+        H[:, TH] = so3.skew(vb)
+        H[:, VEL] = self.R.T
+        self._ekf_update(H, np.asarray(v_body, float) - vb, np.diag(variance))
 
     def _ekf_update(self, H: np.ndarray, r: np.ndarray, Rn: np.ndarray) -> None:
         PHt = self.P @ H.T

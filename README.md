@@ -1,12 +1,14 @@
 # learned-attitude-msckf
 
 Monocular visual-inertial odometry on the EuRoC MAV dataset, written in
-Python. It grew out of my fifth-year project and has three parts:
+Python. It grew out of my fifth-year project and has four parts:
 
 - an **MSCKF** (an error-state EKF over a sliding window of camera poses) that
   starts from a still period it finds on its own, with no ground truth;
 - a small **GRU that corrects 50 ms of gyro integration**, used inside the
   filter as a learned gyro model;
+- a **velocity GRU** that estimates the drone's velocity from the last
+  second of IMU data, which the filter uses while the camera is off;
 - a **takeoff detector** that finds when the motors start and the drone
   leaves the ground, and calibrates the gyro bias in between.
 
@@ -48,7 +50,7 @@ reference bias, which is itself a batch estimate rather than a direct
 measurement. All eleven sequences are in
 [`results/takeoff/reference_original_detector.csv`](results/takeoff/reference_original_detector.csv).
 
-### The GRU on its own, without the camera
+### The gyro GRU on its own, without the camera
 
 Attitude error in degrees when integrating the IMU alone:
 
@@ -114,69 +116,101 @@ sequences:
 | | ATE RMSE [m] | attitude RMSE [deg] | velocity RMSE [m/s] | attitude NEES |
 |---|---|---|---|---|
 | OpenVINS v2.7 | 0.143 | 1.41 | 0.058 | |
-| `msckf` | 0.138 | 1.60 | 0.058 | 513 |
-| `msckf-gru-noise` | **0.128** | 1.40 | **0.051** | 234 |
-| `gru-preflight` | 0.144 | 1.46 | 0.052 | 220 |
-| `gru-filter` | 0.131 | **1.37** | 0.052 | 231 |
+| `msckf` | **0.088** | **1.31** | 0.036 | 252 |
+| `msckf-gru-noise` | 0.089 | **1.31** | **0.035** | 135 |
+| `gru-preflight` | 0.104 | 1.39 | 0.037 | 131 |
+| `gru-filter` | 0.098 | 1.32 | 0.036 | 136 |
 
 <p align="center">
   <img src="results/vio/trajectories_v2.png" width="100%" alt="Estimated and true trajectories on V2">
 </p>
 
-The Python filter is as accurate as OpenVINS on V2. The fine-tuned GRU
-improves on datasheet noise (0.131 m against 0.138 m), but the control does
-just as well, so the gain comes from the larger gyro noise and not from the
-network's rotation. The training sequences say the same: mean ATE 0.30 m for
-`msckf`, 0.19 m for the control and 0.20 m and 0.21 m for the two GRU
-variants (OpenVINS 0.47 m, most of it on MH_03). Per-sequence numbers are in
+The Python filter is more accurate than OpenVINS on V2, and the gyro GRU
+does not improve it: both GRU variants are a centimetre or two worse than
+the plain gyro, and the control matches the plain gyro. The training
+sequences say the same, with mean ATE 0.20 m for `msckf`, 0.28 m for the
+control and 0.24 m and 0.22 m for the two GRU variants (OpenVINS 0.47 m,
+most of it on MH_03). Per-sequence numbers are in
 [`results/vio/ate_per_sequence.md`](results/vio/ate_per_sequence.md) and
 [`results/vio/full_sequences.csv`](results/vio/full_sequences.csv).
 
-The larger noise helps because the filter is overconfident on real data. Its
-attitude NEES is in the hundreds where a consistent filter gives 3, mostly
-from tilt: it settles about half a degree away from EuRoC's reference tilt
-while its own standard deviation is a few hundredths of a degree. The same
-filter is consistent in simulation (below), so the extra error probably
-comes from something the model leaves out, such as calibration or timing
-errors.
+The accelerometer noise density in the filter is 7 times the datasheet
+value. With the datasheet value the filter was overconfident about its
+velocity, tilt and accelerometer bias: on V2 its ATE was 0.138 m, and after
+5 s camera outages it never recovered on four of the eight training and
+validation sequences (see below). Of 1, 5, 7, 10 and 20 times the datasheet
+value, 7 gave the lowest ATE on the training and validation sequences, and
+V2 was not used to choose it. The attitude NEES is still in the hundreds
+where a consistent filter gives 3, mostly from tilt: the filter settles
+about half a degree away from EuRoC's reference tilt while its own standard
+deviation is a few hundredths of a degree. The same filter is consistent in
+simulation (below), so the extra error probably comes from something the
+model leaves out, such as calibration or timing errors.
 
-Two problems turned up on the way to these numbers. The filter used to drop
-features with less than 1° of parallax, so during a ten-second hover on
-MH_04 it received no updates and drifted 7 m; without that gate MH_04 is at
-0.36 m, level with OpenVINS. And measuring the plain gyro's noise against
-EuRoC's reference gives a variance 4 to 50 times below the datasheet's,
-probably because the reference attitude is fitted to the same IMU. A filter
-given that noise diverged on V2_03, which is why the control borrows the
-GRU's noise instead.
+Two other problems turned up on the way to these numbers. The filter used
+to drop features with less than 1° of parallax, so during a ten-second hover
+on MH_04 it received no updates and drifted 7 m; without that gate it is
+at 0.31 m there, against 0.37 m for OpenVINS. And measuring the plain
+gyro's noise against EuRoC's reference gives a variance 4 to 50 times below
+the datasheet's, probably because the reference attitude is fitted to the
+same IMU, which is why the control borrows the GRU's noise instead.
 
 ### Camera outages
 
-A better gyro should matter most when the camera drops out. Each variant
-was run again on V2 with the camera switched off for 1, 2 or 5 s every
-10 s, starting 15 s after initialisation. The table gives the median
-position drift over a gap, from 30 gaps per entry (ten per sequence):
+A learned model should matter most when the camera drops out. Each variant
+was run again on V2 with the camera switched off for 1, 2, 5 or 10 s,
+starting 15 s after initialisation and repeating every 10 s (every 20 s for
+the 10 s gaps, so the camera is always back for at least as long as it was
+off). The tracker restarts after every gap. Three more variants use the
+velocity GRU described below, or a control for it:
 
-| camera off | `msckf` | `msckf-gru-noise` | `gru-preflight` | `gru-filter` |
-|---|---|---|---|---|
-| 1 s | 0.057 m | 0.058 m | 0.058 m | 0.063 m |
-| 2 s | 0.143 m | 0.146 m | 0.147 m | 0.148 m |
-| 5 s | 5.70 m | **1.13 m** | 5.17 m | 3.55 m |
+| variant | gyro model | while the camera is off |
+|---|---|---|
+| `gru-velocity` | plain gyro | velocity GRU, twice a second |
+| `gru-both` | `gru-filter` | velocity GRU, twice a second |
+| `msckf-speed-prior` | plain gyro | "the velocity is zero", with the spread of the training velocities as its uncertainty |
+
+Position drift over a gap on V2, median of 30 gaps (15 for 10 s), with the
+90th percentile for the long gaps:
+
+| variant | 1 s | 2 s | 5 s | 10 s | 5 s, 90th pct. | 10 s, 90th pct. |
+|---|---|---|---|---|---|---|
+| `msckf` | 0.054 m | 0.143 m | 0.66 m | 2.38 m | 13.9 m | 5.2 m |
+| `msckf-gru-noise` | 0.053 m | 0.132 m | 0.69 m | 2.26 m | 16.9 m | 3.4 m |
+| `gru-preflight` | 0.054 m | 0.132 m | 0.64 m | 2.28 m | **1.05 m** | 5.1 m |
+| `gru-filter` | 0.059 m | 0.140 m | 0.56 m | 3.79 m | 1.17 m | 11.5 m |
+| `msckf-speed-prior` | 0.055 m | 0.149 m | 0.74 m | 2.21 m | 4.8 m | 3.1 m |
+| `gru-velocity` | 0.060 m | 0.151 m | 0.79 m | **1.66 m** | 5.1 m | **3.0 m** |
+| `gru-both` | 0.059 m | 0.138 m | **0.49 m** | 1.78 m | 1.24 m | 3.2 m |
 
 <p align="center">
   <img src="results/vio/outages_v2.png" width="100%" alt="Drift over camera outages on V2">
+  <img src="results/vio/outage_trajectories_10s_v2.png" width="100%" alt="Trajectories on V2 with 10 s camera outages">
 </p>
 
-For 1 and 2 s gaps the four variants are the same, and the rotation drift
-is 0.15° to 0.33° for all of them, so the GRU's better
-50 ms rotations make no visible difference. The 5 s gaps show a different
-problem. On V2_01 and V2_03 the filter does not recover its velocity in the
-5 s of vision between gaps, so the error carries into the next gap and the
-drift reaches tens of metres by the end of the flight. Only the control
-stays below 2 m on V2_01, and on V2_02 every variant stays below 7 m. The
-5 s medians therefore show which runs recovered rather than which gyro
-model is better; the rotation drift over 5 s is 0.55° to 0.65° for all
-four. Per-gap numbers are in
-[`results/vio/outages.csv`](results/vio/outages.csv) and the summary in
+For 1 and 2 s gaps all variants are the same: the filter's own velocity is
+still good, and the rotation drift is 0.15° to 0.35° for every gyro model.
+From 5 s on, the velocity GRU is what makes the difference. With 10 s gaps
+it cuts the median drift from 2.38 m to 1.66 m (30%) and the worst 10% from
+5.2 m to 3.0 m. The speed-prior control gets part of the way, to 2.21 m,
+so the network is doing more than telling the filter that the drone flies
+slowly. Over the whole flight with 10 s gaps, the ATE drops from 4.9 m to
+2.1 m.
+
+With 5 s gaps, V2_03 is the hard case. Every variant drifts 1 to 3.5 m in
+its second gap, and with the plain gyro the filter does not fully recover
+its velocity before the next one: the remaining gaps drift several metres
+each (up to 36 m for `msckf`), which is what the large 90th percentiles of
+`msckf`, `msckf-gru-noise`, `msckf-speed-prior` and `gru-velocity` show. All
+three variants with a gyro GRU recover, and `gru-both`, with both networks,
+has the lowest median (0.49 m against 0.66 m) and a mean whole-flight ATE of
+0.73 m against 18.5 m. The gyro GRU's rotations are not better over the
+gap (its rotation drift is slightly larger), so how it helps the recovery
+on V2_03 is not understood yet, and on its own (`gru-filter`) it does worse
+than the plain gyro with 10 s gaps.
+
+Per-gap numbers are in [`results/vio/outages.csv`](results/vio/outages.csv),
+the summary, including whole-flight errors, in
 [`results/vio/outages_summary.md`](results/vio/outages_summary.md).
 
 ### Tilt from vanishing lines
@@ -187,7 +221,99 @@ V2 attitude error from 2.01 to 1.22 deg and the tilt error from 1.87 to
 0.96 deg. This part is not in the filter yet; it is described with the other
 side experiments in [`docs/side_experiments.md`](docs/side_experiments.md).
 
-## How the GRU is used inside the filter
+## The velocity GRU
+
+Without the camera, the position drifts because the velocity drifts. Over a
+5 s gap the rotation error is about half a degree, which by itself would
+move the position by a few centimetres. What moves it by metres is the
+velocity: a tilt error of a degree or two and an accelerometer bias error of
+0.1 to 0.3 m/s² integrate into it, and nothing in the inertial equations
+pulls it back. The gyro GRU only sees 50 ms at a time and corrects
+rotation, so it cannot fix this. A second network that estimates the
+velocity can.
+
+Feeding a network's estimate to an EKF as a measurement, with the
+network's own variance, is the approach of TLIO (Liu et al., 2020), and
+Cioffi et al. (2023) used it on racing drones. The network itself follows
+AirIO (Qiu et al., 2025), which found that for drones the IMU should be
+read in the body frame, not rotated into the world frame, with the attitude
+given to the network separately:
+
+- **Input.** The last second of IMU data (200 samples of gyro and
+  accelerometer, with the filter's current biases removed), averaged in
+  groups of four, and the direction of gravity in the body frame from the
+  filter's attitude.
+- **Network.** Two GRU layers with 64 units, then a small head that also
+  sees the gravity direction. It outputs the body-frame velocity and a
+  log-variance per axis.
+- **Why it can work.** A multirotor's rotor drag acts against its velocity,
+  so the accelerometer measures something that depends on the velocity
+  (Leishman et al., 2014), and one second of data also shows how the drone
+  has been accelerating.
+- **Training.** The same split as the gyro GRU: MH_01 to MH_04 and V1_01 to
+  V1_03 for training, MH_05 for choosing the epoch. Gaussian likelihood plus
+  squared error, 25 epochs. The ground-truth biases and attitude get random
+  errors (0.003 rad/s, 0.08 m/s² and 1°) because inside the filter they come
+  from the filter's estimates.
+- **Ensemble.** Three networks from different seeds are averaged, and their
+  disagreement is added to the predicted variance (Lakshminarayanan et al.,
+  2017). The variance is then scaled per axis so that it matches the errors
+  on MH_05.
+- **In the filter.** While the camera is off, every tenth frame (twice a
+  second), the prediction is applied as an EKF measurement of R<sup>T</sup>v,
+  the body-frame velocity, with the Jacobians for attitude and velocity.
+  Training the three networks takes under an hour on a CPU, and the
+  trained ensemble is in [`models/velocity_gru.pt`](models/velocity_gru.pt).
+
+Velocity error of the network on its own, RMS of the 3-D error:
+
+| | MH_05 (validation) | V2_01 | V2_02 | V2_03 |
+|---|---|---|---|---|
+| always zero | 1.05 m/s | **0.37 m/s** | 0.83 m/s | 0.87 m/s |
+| velocity GRU | **0.53 m/s** | 0.49 m/s | **0.71 m/s** | **0.75 m/s** |
+
+On MH_05 it halves the error of guessing zero, but on V2 it is only a
+little better, and on the slow V2_01 flight it is worse. Part of that is a
+bias: on V2 the network is off by 0.3 to 0.4 m/s along the body z axis,
+averaged over each flight. Its predicted variance is also too small on V2
+(normalised error 1.2 to 1.6 instead of 1). Even so, it is enough to bound the drift
+inside the filter, because the filter's own velocity error grows without
+limit. The numbers are in
+[`results/velocity/velocity_errors.csv`](results/velocity/velocity_errors.csv).
+
+### Trained in one room, flown in another
+
+The ensemble above was trained partly on V1, which was flown in the same
+room as the V2 test flights. To see whether the network transfers to a room
+it has never seen, a second ensemble was trained on the machine hall only
+(MH_01 to MH_04) and flown on V1:
+
+| V1, network trained on the machine hall | 5 s median | 10 s median | 10 s, 90th pct. | 10 s, whole-flight ATE |
+|---|---|---|---|---|
+| `msckf` | 0.42 m | 2.54 m | 38.4 m | 45.7 m |
+| `gru-velocity` | **0.40 m** | **1.54 m** | **1.90 m** | **1.50 m** |
+
+Without it the filter diverges on V1_03 with 10 s gaps; with it, no flight
+does, and the median drift drops by 40%. That is despite a large bias: on
+V1_01 this network is off by 1.1 m/s along the body y axis on average.
+Learning that bias while the camera is on (a running mean of the difference
+between the network and the filter) and removing it during the gaps was
+tried and did not help (10 s median 1.83 m instead of 1.54 m), because the
+network's error changes over tens of seconds rather than staying constant.
+The numbers are in
+[`results/cross_room/outages_summary.md`](results/cross_room/outages_summary.md)
+and the checkpoint is
+[`models/velocity_gru_mh.pt`](models/velocity_gru_mh.pt).
+
+Things that were tried and dropped: giving the network the gravity
+direction at every sample (better on its own, but less robust inside the
+filter), larger bias and tilt errors during training (worse), widening the
+filter's velocity uncertainty when the camera comes back (more divergence,
+probably because monocular vision then settles on a wrong scale), and
+continuing the velocity measurements for a few seconds after the camera
+returns (no change).
+
+## How the gyro GRU is used inside the filter
 
 For each camera interval of length T (50 ms, ten IMU samples) the filter
 would normally integrate the gyro minus its current bias estimate b̂ and get
@@ -227,7 +353,8 @@ were dropped.
   up to 11 IMU-pose clones. Attitude errors are right-multiplicative and the
   world frame is gravity-aligned.
 - **Propagation.** Midpoint integration at 200 Hz, with first-estimate
-  Jacobians in both propagation and the feature updates.
+  Jacobians in both propagation and the feature updates. The accelerometer
+  noise density is 7 times the datasheet value (see the results).
 - **Front end.** KLT on CLAHE-equalised images, a 1 px forward-backward
   check, fundamental-matrix RANSAC, and grid-based top-up to 200 features.
 - **Update.** A feature is used when its track ends or reaches the oldest
@@ -274,8 +401,9 @@ bash scripts/reproduce.sh data/euroc
 ```
 
 This checks the data, runs the tests, detects takeoff, calibrates and
-fine-tunes the GRU, runs every filter variant on all sequences plus the V2
-outage runs, and scores them. Finished runs are skipped, so it can be
+fine-tunes the gyro GRU, scores the velocity GRU, runs every filter variant
+on all sequences plus the V2 outage runs, and scores them. The velocity GRU
+is only trained again if `models/velocity_gru.pt` is missing. Finished runs are skipped, so it can be
 restarted. `JOBS=4` sets the number of parallel filter runs. If you have
 OpenVINS exports, pass their folder as a second argument to score them with
 the same code.
@@ -288,7 +416,10 @@ python scripts/train_gru.py calibrate --euroc data/euroc --checkpoint models/gru
 python scripts/train_gru.py train --euroc data/euroc --init models/gru_preflight.pt --out models/gru_filter.pt
 python scripts/train_gru.py calibrate --euroc data/euroc --checkpoint models/gru_filter.pt --out models/gru_filter_cal.pt
 python scripts/train_gru.py compare --euroc data/euroc original=models/gru_preflight.pt fine-tuned=models/gru_filter.pt
+python scripts/train_velocity.py train --euroc data/euroc --members 3 --out models/velocity_gru.pt
+python scripts/train_velocity.py evaluate --euroc data/euroc --checkpoint models/velocity_gru.pt
 python scripts/run_vio.py --euroc data/euroc --variant msckf gru-filter --sequences V2_01_easy
+python scripts/run_vio.py --euroc data/euroc --variant msckf gru-velocity gru-both --outage 10 --sequences V2_01_easy
 python scripts/evaluate.py --euroc data/euroc
 ```
 
@@ -305,6 +436,7 @@ qvio/
   msckf.py      the filter
   pipeline.py   cold start and the per-frame loop
   gru.py        the attitude GRU as a gyro model
+  velocity.py   the velocity GRU and its control
   takeoff.py    takeoff detection and preflight calibration
   metrics.py    ATE, RPE, tilt, NEES, outage drift
 scripts/        data preparation, training, runs, scoring, reproduce.sh
@@ -323,8 +455,10 @@ tests/          unit tests and a simulated flight
 - V2 was never used for training or tuning in this repository, but it was
   looked at during the wider project, so it is a held-out test set rather
   than an untouched one.
-- After a 5 s camera outage the filter often fails to recover before the
-  next one, so it is not yet robust to long losses of vision.
+- With the plain gyro the filter still fails to recover from the second
+  5 s outage on V2_03. The velocity GRU has a flight-long bias on V2 and
+  its errors are correlated over about a second, while the filter treats
+  each measurement as independent.
 - The filter is monocular and written for clarity, not speed. It is slower
   than OpenVINS and has no loop closure or persistent map.
 
@@ -337,6 +471,15 @@ tests/          unit tests and a simulated flight
   consistency of extended Kalman filter based SLAM*, ICRA 2008.
 - P. Geneva et al., *OpenVINS: A research platform for visual-inertial
   estimation*, ICRA 2020.
+- Y. Qiu et al., *AirIO: Learning inertial odometry with enhanced IMU
+  feature observability*, IEEE RA-L 2025.
+- W. Liu et al., *TLIO: Tight learned inertial odometry*, IEEE RA-L 2020.
+- G. Cioffi et al., *Learned inertial odometry for autonomous drone
+  racing*, IEEE RA-L 2023.
+- R. Leishman et al., *Quadrotors and accelerometers: State estimation with
+  an improved dynamic model*, IEEE Control Systems Magazine 2014.
+- B. Lakshminarayanan, A. Pritzel and C. Blundell, *Simple and scalable
+  predictive uncertainty estimation using deep ensembles*, NeurIPS 2017.
 
 ## Licence
 
