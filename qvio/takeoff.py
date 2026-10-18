@@ -201,9 +201,10 @@ def visual_features(seq: Sequence, cfg: DetectorConfig, progress=None) -> pd.Dat
                 pb, s2, _ = cv2.calcOpticalFlowPyrLK(gray, prev, p1, None, **lk)
                 fb = np.linalg.norm(pb.reshape(-1, 2) - p0, axis=1)
                 ok = s1.ravel().astype(bool) & s2.ravel().astype(bool) & (fb <= cfg.fb_limit_px)
-                u0 = cv2.undistortPoints(p0[ok].reshape(-1, 1, 2), K, dist, P=K).reshape(-1, 2)
-                u1 = cv2.undistortPoints(p1.reshape(-1, 2)[ok].reshape(-1, 1, 2), K, dist, P=K).reshape(-1, 2)
-                if len(u0):
+                # OpenCV rejects an empty point array, which happens on dark or blurred frames.
+                if ok.any():
+                    u0 = cv2.undistortPoints(p0[ok].reshape(-1, 1, 2), K, dist, P=K).reshape(-1, 2)
+                    u1 = cv2.undistortPoints(p1.reshape(-1, 2)[ok].reshape(-1, 1, 2), K, dist, P=K).reshape(-1, 2)
                     row.update(_motion_evidence(seq, cfg, u0, u1, fb[ok], int(seq.cam_t[k - 1]), int(t), bias))
         rows.append(row)
         prev = gray

@@ -24,8 +24,9 @@ python scripts/prepare_euroc.py check "$EUROC"
 python -m pytest -q || echo "some tests failed; continuing, but check the log"
 
 step "takeoff detection and preflight gyro bias"
-python scripts/detect_takeoff.py --euroc "$EUROC"
-python scripts/detect_takeoff.py --euroc "$EUROC" --sequences V2_01_easy --video
+# Nothing later depends on these, so a failure here should not stop the run.
+python scripts/detect_takeoff.py --euroc "$EUROC" || echo "takeoff detection failed; continuing"
+python scripts/detect_takeoff.py --euroc "$EUROC" --sequences V2_01_easy --video || true
 
 step "gyro and GRU noise, measured on MH_05"
 python scripts/train_gru.py calibrate --euroc "$EUROC" --out models/gyro_calibrated.json
