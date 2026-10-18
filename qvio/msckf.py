@@ -401,6 +401,18 @@ class MSCKF:
         H[:, VEL] = self.R.T
         self._ekf_update(H, np.asarray(v_body, float) - vb, np.diag(variance))
 
+    def reset_velocity(self, v: np.ndarray, sigma: float) -> None:
+        """Take a velocity measured some other way when the filter's own is wrong.
+
+        The velocity covariance is first widened by the disagreement, so the
+        update all but replaces the velocity instead of averaging with it.
+        """
+        r = np.asarray(v, float) - self.v
+        self.P[VEL, VEL] += np.outer(r, r)
+        H = np.zeros((3, self.dim))
+        H[:, VEL] = np.eye(3)
+        self._ekf_update(H, r, np.eye(3) * sigma**2)
+
     def _ekf_update(self, H: np.ndarray, r: np.ndarray, Rn: np.ndarray) -> None:
         PHt = self.P @ H.T
         S = H @ PHt + Rn

@@ -61,14 +61,20 @@ python scripts/run_vio.py --euroc "$EUROC" \
     --variant msckf msckf-gru-noise gru-preflight gru-filter msckf-speed-prior gru-velocity gru-both \
     --sequences $V2 --outage 1 2 5 10 --jobs "$JOBS"
 
+step "camera outages on V2 without the velocity reset after each gap"
+# shellcheck disable=SC2086
+python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-speed-prior gru-velocity \
+    --sequences $V2 --outage 5 10 --no-recovery --out runs/no_recovery --jobs "$JOBS"
+
 step "velocity GRU in an unseen room"
 # Trained on the machine hall only, flown in the Vicon room.
 # shellcheck disable=SC2086
-python scripts/run_vio.py --euroc "$EUROC" --variant msckf gru-velocity --sequences $V1 \
+python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-speed-prior gru-velocity --sequences $V1 \
     --outage 5 10 --velocity-model models/velocity_gru_mh.pt --out runs/cross_room --jobs "$JOBS"
 
 step "scoring"
 python scripts/evaluate.py --euroc "$EUROC" ${OPENVINS:+--openvins "$OPENVINS"}
+python scripts/evaluate.py --euroc "$EUROC" --runs runs/no_recovery --out results/no_recovery
 python scripts/evaluate.py --euroc "$EUROC" --runs runs/cross_room --out results/cross_room
 
 step "done; tables are in results/, the full log in logs/reproduce.log"

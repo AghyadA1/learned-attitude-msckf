@@ -16,6 +16,7 @@ from . import so3
 from .euroc import Sequence
 from .frontend import Frame, KLTTracker, TrackerConfig
 from .msckf import MSCKF, FilterConfig
+from .recovery import RecoveryConfig, RecoveryWindow
 
 
 @dataclass(frozen=True)
@@ -149,15 +150,20 @@ def hidden_frames(seq: Sequence, outages: list[tuple[int, int]]) -> np.ndarray:
 
 def run(seq: Sequence, frames: list[Frame], config: FilterConfig = FilterConfig(),
         gyro_model=None, outages: list[tuple[int, int]] | None = None,
-        start: StaticStart | None = None, velocity_model=None, velocity_every: int = 10,
-        progress=None) -> dict:
+        start: StaticStart | None = None, velocity_model=None, velocity_every: int = 20,
+        recovery: RecoveryConfig | None = RecoveryConfig(), progress=None) -> dict:
     """Run the filter and return the estimated states at every camera time.
 
     With ``outages`` the frames must come from :func:`outage_frames`, and
     ``start`` from the uninterrupted tracks, since the camera is hidden only
     after the filter has started. A ``velocity_model`` (see
     ``qvio.velocity``) is applied every ``velocity_every`` frames while the
-    camera is off.
+    camera is off; 20 frames is the network's 1 s window, so no two
+    measurements share IMU samples and their errors are close to
+    independent, as the update assumes (every 10 frames counted each error
+    twice and made the filter too sure of its velocity). After each outage, ``recovery`` (see ``qvio.recovery``)
+    re-estimates the velocity from the first images if the filter rejects
+    most of their features; None turns that off.
     """
     start = start or find_static_start(seq, frames)
     f = MSCKF(seq.camera, seq.noise, config, gyro_model)
@@ -167,15 +173,23 @@ def run(seq: Sequence, frames: list[Frame], config: FilterConfig = FilterConfig(
     still = True
     previous = frames[start.frame]
     out = {k: [] for k in ("t", "p", "q", "v", "bg", "ba", "P", "hidden", "accepted")}
+    recovered = []
     n = len(seq.cam_t)
     since_velocity = 0
+    window = None
     for k in range(start.frame, n):
         t = int(seq.cam_t[k])
         if t > f.t:
-            f.propagate(*_imu_samples(seq, f.t, t))
+            samples = _imu_samples(seq, f.t, t)
+            if window is not None:
+                window.add_imu(*samples, f.R, f.bg, f.ba)
+            f.propagate(*samples)
         if hidden[k] and not hidden[k - 1]:
             f.drop_tracks()
             since_velocity = 0
+            window = None
+        if recovery is not None and k > 0 and hidden[k - 1] and not hidden[k]:
+            window = RecoveryWindow(t)
         if hidden[k] and velocity_model is not None:
             since_velocity += 1
             if since_velocity == velocity_every:
@@ -183,11 +197,22 @@ def run(seq: Sequence, frames: list[Frame], config: FilterConfig = FilterConfig(
                 v, var = _velocity_prediction(f, seq, t, velocity_model)
                 if v is not None:
                     f.body_velocity_update(v, var)
+        if window is not None:
+            window.add_frame(t, f.R, seq.camera, frames[k].ids, frames[k].xy)
+            if len(window) == recovery.frames:
+                if window.accepted <= recovery.max_accepted:
+                    v = window.velocity(recovery)
+                    if v is not None:
+                        f.reset_velocity(v, recovery.sigma_m_s)
+                        recovered.append(t)
+                window = None
         if hidden[k]:
             accepted = 0
         else:
             stats = f.process_frame(t, frames[k].ids, frames[k].xy)
             accepted = stats.accepted
+            if window is not None:
+                window.accepted += accepted
             if still:
                 still = median_flow(previous, frames[k]) < 0.5
                 if still:
@@ -202,4 +227,5 @@ def run(seq: Sequence, frames: list[Frame], config: FilterConfig = FilterConfig(
             progress(k, n)
     result = {k: np.asarray(v) for k, v in out.items()}
     result["start_t"] = start.t
+    result["recovered_t"] = np.asarray(recovered, np.int64)
     return result

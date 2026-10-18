@@ -13,7 +13,10 @@ Variants
 
 With --outage D the camera is switched off for D seconds every max(10, 2D) s,
 starting 15 s after initialisation; the tracker restarts after each gap. The tracks
-for each outage length are cached too, so only the first run needs images.
+for each outage length are cached too, so only the first run needs images. After
+each gap the velocity is re-estimated from the first second of images if the
+filter rejects most of their features (qvio/recovery.py); --no-recovery turns
+that off.
 
   python scripts/run_vio.py --euroc DATA --variant msckf gru-filter --jobs 4
   python scripts/run_vio.py --euroc DATA --variant msckf-gru-noise gru-filter --outage 2 --sequences V2_01_easy
@@ -44,6 +47,7 @@ sys.path.insert(0, str(ROOT))
 
 from qvio import euroc, pipeline  # noqa: E402
 from qvio.gru import WINDOW  # noqa: E402
+from qvio.recovery import RecoveryConfig  # noqa: E402
 
 MODELS = ROOT / "models"
 VARIANTS = {
@@ -123,7 +127,7 @@ def outage_schedule(seq, start_t: int, duration_s: float, first_s=15.0, period_s
 
 
 def run_one(root: str, name: str, variant: str, outage_s: float, out_dir: str,
-            velocity_checkpoint: str = str(VELOCITY_MODEL)) -> str:
+            velocity_checkpoint: str = str(VELOCITY_MODEL), recovery: bool = True) -> str:
     import cv2
 
     cv2.setNumThreads(1)
@@ -137,7 +141,8 @@ def run_one(root: str, name: str, variant: str, outage_s: float, out_dir: str,
     model = gyro_model(variant)
     tic = time.time()
     result = pipeline.run(seq, frames, gyro_model=model, outages=outages, start=start,
-                          velocity_model=velocity_model(variant, velocity_checkpoint))
+                          velocity_model=velocity_model(variant, velocity_checkpoint),
+                          recovery=RecoveryConfig() if recovery else None)
     result["runtime_s"] = time.time() - tic
     result["outages"] = np.asarray(outages, np.int64).reshape(-1, 2)
     if model is not None and hasattr(model, "used"):
@@ -158,6 +163,8 @@ def main() -> None:
     parser.add_argument("--out", default=str(ROOT / "runs"))
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--velocity-model", default=str(VELOCITY_MODEL), help="velocity GRU checkpoint")
+    parser.add_argument("--no-recovery", action="store_true",
+                        help="skip the velocity reset after each outage (qvio/recovery.py)")
     parser.add_argument("--force", action="store_true", help="re-run even if the output file exists")
     args = parser.parse_args()
 
@@ -174,7 +181,7 @@ def main() -> None:
         tasks = [t for t in tasks if not (Path(t[4]) / f"{t[1]}.npz").is_file()]
     failed = []
     with ProcessPoolExecutor(args.jobs) as pool:
-        futures = {pool.submit(run_one, *task, args.velocity_model): task for task in tasks}
+        futures = {pool.submit(run_one, *task, args.velocity_model, not args.no_recovery): task for task in tasks}
         for future in as_completed(futures):
             try:
                 print(future.result(), flush=True)

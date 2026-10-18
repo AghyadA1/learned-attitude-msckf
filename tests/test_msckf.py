@@ -94,3 +94,17 @@ def test_body_velocity_jacobian(flight):
     # A near-perfect measurement moves the estimate onto it.
     f.body_velocity_update(vb + 0.05, np.full(3, 1e-10))
     np.testing.assert_allclose(f.R.T @ f.v, vb + 0.05, atol=5e-3)
+
+
+def test_reset_velocity_overrides_a_confident_estimate(flight):
+    seq, _, _ = flight
+    from qvio.msckf import MSCKF, VEL
+
+    f = MSCKF(seq.camera, seq.noise)
+    f.initialize(0, np.eye(3), np.zeros(3))
+    f.v = np.array([1.0, 0.0, 0.0])          # 1 m/s off, with a 2 cm/s sigma
+    f.reset_velocity(np.zeros(3), 0.2)
+    assert np.linalg.norm(f.v) < 0.05
+    sigma = np.sqrt(np.diag(f.P[VEL, VEL]))
+    assert np.all(sigma < 0.2) and np.all(sigma > 0.01)
+    assert np.linalg.eigvalsh(f.P).min() > -1e-12
