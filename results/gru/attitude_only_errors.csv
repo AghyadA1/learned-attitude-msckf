@@ -1,0 +1,31 @@
+split,horizon,method,mean_error_deg,p95_error_deg,windows,final_error_deg,drift_deg_s
+val,0.05 s window,raw gyro,0.22903,0.24758,2220,,
+val,0.05 s window,gyro - preflight bias,0.01727,0.03487,2220,,
+val,0.05 s window,"GRU, raw-gyro prior",0.01145,0.02274,2220,,
+val,0.05 s window,"GRU, bias-corrected prior",0.00979,0.01997,2220,,
+val,0.05 s window,gyro - EuRoC GT bias,0.01686,0.03512,2220,,
+test,0.05 s window,raw gyro,0.24378,0.28051,6029,,
+test,0.05 s window,gyro - preflight bias,0.03285,0.08352,6029,,
+test,0.05 s window,"GRU, raw-gyro prior",0.02965,0.07533,6029,,
+test,0.05 s window,"GRU, bias-corrected prior",0.02528,0.07182,6029,,
+test,0.05 s window,gyro - EuRoC GT bias,0.03205,0.0834,6029,,
+val,1 s (20 steps),raw gyro,4.5604,4.60374,2201,,
+val,1 s (20 steps),gyro - preflight bias,0.08668,0.13923,2201,,
+val,1 s (20 steps),"GRU, raw-gyro prior",0.10491,0.17461,2201,,
+val,1 s (20 steps),"GRU, bias-corrected prior",0.06197,0.12821,2201,,
+val,1 s (20 steps),gyro - EuRoC GT bias,0.04418,0.09273,2201,,
+test,1 s (20 steps),raw gyro,4.79163,4.9724,5812,,
+test,1 s (20 steps),gyro - preflight bias,0.22721,0.4516,5812,,
+test,1 s (20 steps),"GRU, raw-gyro prior",0.32291,0.61926,5812,,
+test,1 s (20 steps),"GRU, bias-corrected prior",0.2309,0.4937,5812,,
+test,1 s (20 steps),gyro - EuRoC GT bias,0.18153,0.39931,5812,,
+val,whole flight,raw gyro,121.39501,174.12104,2220,74.88585,0.56498
+val,whole flight,gyro - preflight bias,3.1552,5.88057,2220,6.29805,0.05379
+val,whole flight,"GRU, raw-gyro prior",3.82598,6.79684,2220,6.96083,0.05854
+val,whole flight,"GRU, bias-corrected prior",0.95293,1.71207,2220,2.01021,0.01625
+val,whole flight,gyro - EuRoC GT bias,0.38129,0.55335,2220,0.55797,0.00309
+test,whole flight,raw gyro,101.82337,158.45929,6029,133.69511,0.99974
+test,whole flight,gyro - preflight bias,3.15511,6.36756,6029,6.59643,0.04736
+test,whole flight,"GRU, raw-gyro prior",13.56901,74.77067,6029,45.82765,0.41027
+test,whole flight,"GRU, bias-corrected prior",2.57041,4.97883,6029,5.53138,0.03623
+test,whole flight,gyro - EuRoC GT bias,0.91776,2.23418,6029,1.24259,0.00991

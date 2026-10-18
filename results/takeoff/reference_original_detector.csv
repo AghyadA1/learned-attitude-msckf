@@ -1,0 +1,12 @@
+sequence,split,starts_airborne,takeoff_detected,motor_start_s,takeoff_s,interval,causal,start_s,end_s,bias_x_deg_s,bias_y_deg_s,bias_z_deg_s,bias_error_deg_s
+MH_01_easy,train,True,False,,,LATER_STATIC_NON_CAUSAL,False,20.5,31.6,-0.1817,1.1947,4.5741,0.0867
+MH_02_easy,train,True,False,,,LATER_STATIC_NON_CAUSAL,False,32.2,38.0,-0.1355,1.1289,4.4584,0.0934
+MH_03_medium,train,False,True,0.25,2.545,MOTORS_ON_GROUNDED_STATIC,True,0.7,2.5,-0.1719,1.1909,4.4988,0.1035
+MH_04_difficult,train,False,True,,1.645,PREFLIGHT_STATIC,True,0.0,1.6,-0.1918,1.0036,4.5451,0.2642
+MH_05_difficult,val,False,True,0.25,3.745,MOTORS_ON_GROUNDED_STATIC,True,0.0,3.5,-0.1128,1.1651,4.4707,0.0755
+V1_01_easy,train,False,True,0.25,4.945,MOTORS_ON_GROUNDED_STATIC,True,0.0,4.9,-0.116,1.1768,4.4796,0.1094
+V1_02_medium,train,False,True,0.745,4.345,MOTORS_ON_GROUNDED_STATIC,True,0.7,4.3,-0.112,1.0973,4.4442,0.1377
+V1_03_difficult,train,False,True,3.045,6.445,MOTORS_ON_GROUNDED_STATIC,True,3.0,6.4,-0.1179,1.1446,4.4861,0.1441
+V2_01_easy,test,False,True,0.25,4.245,MOTORS_ON_GROUNDED_STATIC,True,0.0,4.2,-0.1226,1.2949,4.7664,0.1603
+V2_02_medium,test,False,True,0.25,3.345,MOTORS_ON_GROUNDED_STATIC,True,0.0,2.7,-0.0481,1.3501,4.5906,0.1473
+V2_03_difficult,test,False,True,0.345,5.145,MOTORS_ON_GROUNDED_STATIC,True,0.3,5.1,-0.0992,1.3082,4.6889,0.1306
