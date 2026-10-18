@@ -1,0 +1,2 @@
+sequence,takeoff_detected,takeoff_s,motor_start_s,interval,causal,start_s,end_s,bias_x_deg_s,bias_y_deg_s,bias_z_deg_s,bias_error_deg_s
+V2_01_easy,True,4.24,0.25,MOTORS_ON_GROUNDED_STATIC,True,0.0,4.2,-0.122555720653789,1.2949182763744405,4.766359583952424,0.16031075013738957

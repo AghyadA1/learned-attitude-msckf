@@ -94,7 +94,9 @@ bias, rather than on its own.
 
 All trajectories are aligned to ground truth with a yaw rotation and a
 translation (4-DoF). The OpenVINS baseline is described in
-[`baselines/openvins`](baselines/openvins), with all eleven sequences in
+[`baselines/openvins`](baselines/openvins). Its exported trajectories are
+scored below with the same code as the Python filter; the numbers from the
+original project are in
 [`results/openvins/euroc_openvins_v2.7.csv`](results/openvins/euroc_openvins_v2.7.csv).
 The Python filter runs in four variants, all from the same cold start:
 
@@ -111,11 +113,11 @@ sequences:
 
 | | ATE RMSE [m] | attitude RMSE [deg] | velocity RMSE [m/s] | attitude NEES |
 |---|---|---|---|---|
-| OpenVINS v2.7 | 0.144 | **1.33** | 0.057 | |
+| OpenVINS v2.7 | 0.143 | 1.41 | 0.058 | |
 | `msckf` | 0.138 | 1.60 | 0.058 | 513 |
 | `msckf-gru-noise` | **0.128** | 1.40 | **0.051** | 234 |
 | `gru-preflight` | 0.144 | 1.46 | 0.052 | 220 |
-| `gru-filter` | 0.131 | 1.37 | 0.052 | 231 |
+| `gru-filter` | 0.131 | **1.37** | 0.052 | 231 |
 
 <p align="center">
   <img src="results/vio/trajectories_v2.png" width="100%" alt="Estimated and true trajectories on V2">
@@ -126,7 +128,7 @@ improves on datasheet noise (0.131 m against 0.138 m), but the control does
 just as well, so the gain comes from the larger gyro noise and not from the
 network's rotation. The training sequences say the same: mean ATE 0.30 m for
 `msckf`, 0.19 m for the control and 0.20 m and 0.21 m for the two GRU
-variants (OpenVINS 0.50 m, most of it on MH_03). Per-sequence numbers are in
+variants (OpenVINS 0.47 m, most of it on MH_03). Per-sequence numbers are in
 [`results/vio/ate_per_sequence.md`](results/vio/ate_per_sequence.md) and
 [`results/vio/full_sequences.csv`](results/vio/full_sequences.csv).
 
@@ -147,9 +149,35 @@ probably because the reference attitude is fitted to the same IMU. A filter
 given that noise diverged on V2_03, which is why the control borrows the
 GRU's noise instead.
 
-Each variant also runs with the camera switched off for 1, 2 or 5 s every
-10 s, which is where a better gyro should matter most;
-`scripts/reproduce.sh` writes those results to `results/vio/outages_summary.md`.
+### Camera outages
+
+A better gyro should matter most when the camera drops out. Each variant
+was run again on V2 with the camera switched off for 1, 2 or 5 s every
+10 s, starting 15 s after initialisation. The table gives the median
+position drift over a gap, from 30 gaps per entry (ten per sequence):
+
+| camera off | `msckf` | `msckf-gru-noise` | `gru-preflight` | `gru-filter` |
+|---|---|---|---|---|
+| 1 s | 0.057 m | 0.058 m | 0.058 m | 0.063 m |
+| 2 s | 0.143 m | 0.146 m | 0.147 m | 0.148 m |
+| 5 s | 5.70 m | **1.13 m** | 5.17 m | 3.55 m |
+
+<p align="center">
+  <img src="results/vio/outages_v2.png" width="100%" alt="Drift over camera outages on V2">
+</p>
+
+For 1 and 2 s gaps the four variants are the same, and the rotation drift
+is 0.15° to 0.33° for all of them, so the GRU's better
+50 ms rotations make no visible difference. The 5 s gaps show a different
+problem. On V2_01 and V2_03 the filter does not recover its velocity in the
+5 s of vision between gaps, so the error carries into the next gap and the
+drift reaches tens of metres by the end of the flight. Only the control
+stays below 2 m on V2_01, and on V2_02 every variant stays below 7 m. The
+5 s medians therefore show which runs recovered rather than which gyro
+model is better; the rotation drift over 5 s is 0.55° to 0.65° for all
+four. Per-gap numbers are in
+[`results/vio/outages.csv`](results/vio/outages.csv) and the summary in
+[`results/vio/outages_summary.md`](results/vio/outages_summary.md).
 
 ### Tilt from vanishing lines
 
@@ -295,6 +323,8 @@ tests/          unit tests and a simulated flight
 - V2 was never used for training or tuning in this repository, but it was
   looked at during the wider project, so it is a held-out test set rather
   than an untouched one.
+- After a 5 s camera outage the filter often fails to recover before the
+  next one, so it is not yet robust to long losses of vision.
 - The filter is monocular and written for clarity, not speed. It is slower
   than OpenVINS and has no loop closure or persistent map.
 
