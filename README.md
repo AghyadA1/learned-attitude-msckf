@@ -4,7 +4,9 @@ Monocular visual-inertial odometry on the EuRoC MAV dataset, written in
 Python. It grew out of my fifth-year project and has four parts:
 
 - an **MSCKF** (an error-state EKF over a sliding window of camera poses) that
-  starts from a still period it finds on its own, with no ground truth;
+  starts from a still period it finds on its own, with no ground truth, and
+  re-estimates its velocity from the camera when it comes back after an
+  outage;
 - a small **GRU that corrects 50 ms of gyro integration**, used inside the
   filter as a learned gyro model;
 - a **velocity GRU** that estimates the drone's velocity from the last
@@ -166,35 +168,37 @@ velocity GRU described below, or a control for it:
 
 | variant | gyro model | while the camera is off |
 |---|---|---|
-| `gru-velocity` | plain gyro | velocity GRU, twice a second |
-| `gru-both` | `gru-filter` | velocity GRU, twice a second |
-| `msckf-speed-prior` | plain gyro | "the velocity is zero", with the spread of the training velocities as its uncertainty |
+| `gru-velocity` | plain gyro | velocity GRU, once a second |
+| `gru-both` | `gru-filter` | velocity GRU, once a second |
+| `msckf-speed-prior` | plain gyro | "the velocity is zero", with the spread of the training velocities as its uncertainty, once a second |
+
+Every variant re-estimates its velocity from the camera after each gap when
+it needs to (see [below](#getting-the-velocity-back-after-a-gap)).
 
 Position drift over a gap on V2, median of 30 gaps (15 for 10 s):
 
 | variant | 1 s | 2 s | 5 s | 10 s |
 |---|---|---|---|---|
-| `msckf` | 0.057 m | 0.140 m | 0.63 m | 2.49 m |
+| `msckf` | 0.057 m | 0.140 m | 0.61 m | 2.29 m |
 | `msckf-gru-noise` | **0.049 m** | **0.124 m** | 0.68 m | 2.26 m |
-| `gru-preflight` | 0.058 m | 0.136 m | 0.84 m | 3.93 m |
-| `gru-filter` | 0.059 m | 0.150 m | 0.91 m | 6.27 m |
-| `msckf-speed-prior` | 0.056 m | 0.145 m | **0.60 m** | 2.21 m |
-| `gru-velocity` | 0.062 m | 0.152 m | 0.76 m | **1.71 m** |
-| `gru-both` | 0.058 m | 0.139 m | 0.64 m | 1.81 m |
+| `gru-preflight` | 0.058 m | 0.136 m | 0.78 m | 2.80 m |
+| `gru-filter` | 0.059 m | 0.150 m | 0.68 m | 2.44 m |
+| `msckf-speed-prior` | 0.056 m | 0.146 m | 0.63 m | 1.87 m |
+| `gru-velocity` | 0.059 m | 0.150 m | 0.65 m | 1.84 m |
+| `gru-both` | 0.056 m | 0.143 m | **0.57 m** | **1.54 m** |
 
-For the long gaps the median hides the runs that do not recover, so here
-are also the worst 10% of gaps and the error over the whole flight (ATE,
-mean of the three flights):
+The worst 10% of gaps, and the error over the whole flight (ATE, mean of
+the three flights):
 
 | variant | 5 s, 90th pct. | 10 s, 90th pct. | 5 s, whole flight | 10 s, whole flight |
 |---|---|---|---|---|
-| `msckf` | 17.9 m | 4.3 m | 17.9 m | 4.43 m |
-| `msckf-gru-noise` | 1.6 m | 4.6 m | **1.15 m** | 3.78 m |
-| `gru-preflight` | 28.7 m | 47.8 m | 38.6 m | 38.8 m |
-| `gru-filter` | 25.1 m | 34.1 m | 35.1 m | 40.4 m |
-| `msckf-speed-prior` | **1.4 m** | 3.7 m | 1.50 m | 2.48 m |
-| `gru-velocity` | 3.7 m | **3.1 m** | 2.26 m | 2.23 m |
-| `gru-both` | 2.2 m | **3.1 m** | 4.40 m | **1.97 m** |
+| `msckf` | 1.18 m | 3.54 m | 1.26 m | 1.80 m |
+| `msckf-gru-noise` | 1.24 m | 3.87 m | 1.09 m | 1.71 m |
+| `gru-preflight` | 1.36 m | 3.76 m | 1.61 m | 3.33 m |
+| `gru-filter` | 1.25 m | 4.65 m | 0.97 m | 3.17 m |
+| `msckf-speed-prior` | **1.10 m** | **2.82 m** | 0.88 m | 1.43 m |
+| `gru-velocity` | 1.17 m | 2.91 m | 0.93 m | **1.40 m** |
+| `gru-both` | 1.20 m | 3.29 m | **0.63 m** | 2.16 m |
 
 <p align="center">
   <img src="results/vio/outages_v2.png" width="100%" alt="Drift over camera outages on V2">
@@ -205,30 +209,71 @@ For 1 and 2 s gaps the differences are a centimetre or two either way: the
 filter's own velocity is still good, and the rotation drift is 0.15° to
 0.35° for every gyro model.
 
-With 10 s gaps the velocity GRU makes the difference. It cuts the median
-drift from 2.49 m to 1.71 m (31%), the worst 10% from 4.3 m to 3.1 m, and
-the whole-flight ATE from 4.4 m to 2.2 m (2.0 m with both GRUs). The
-speed-prior control gets part of the way, to a median of 2.21 m, so the
-network does more than tell the filter that the drone flies slowly.
+With 5 s gaps the velocity GRU gives a small but consistent gain. Per
+flight (V2_01, V2_02, V2_03) its median drift is 0.51, 0.39 and 0.78 m,
+against 0.61, 0.49 and 0.80 m for `msckf` and 0.59, 0.46 and 0.80 m for
+the speed prior. Gap by gap, it drifts less than `msckf` in 60% of the
+gaps and less than the speed prior in 63%, by 6 and 5 cm on average. The
+pooled median above hides this because the three flights have different
+drift levels. With both GRUs the median is lowest (0.57 m), and so is the
+whole-flight error (0.63 m against 1.26 m for `msckf`).
 
-With 5 s gaps the result depends on V2_03. There the plain filter does not
-get its velocity back in the 5 s of vision between gaps: from the second
-gap on it drifts further every time, up to 37 m. The velocity GRU stops
-this (whole-flight ATE 2.3 m instead of 17.9 m), although some gaps in the
-middle of V2_03 still drift 2 to 6 m. The speed-prior control and
-`msckf-gru-noise` recover on V2_03 as well and do slightly better, so at
-5 s the gain cannot be credited to what the network learned. Which variants
-recover on V2_03 is also sensitive to small changes: in an earlier test in
-which the tracks carried on across the gaps instead of restarting, the
-gyro-GRU variants recovered and the speed prior did not. Three flights are
-too few to rank the variants that recover.
+With 10 s gaps the velocity GRU cuts the median drift from 2.29 m to
+1.84 m (20%), the worst 10% from 3.5 m to 2.9 m, and the whole-flight
+error from 1.80 m to 1.40 m. The speed-prior control does as well here
+(1.87 m), so at 10 s on V2 the gain cannot be credited to what the network
+learned, only to bounding the velocity at all. With both GRUs the median is
+lower again (1.54 m), but the worst gaps and the whole-flight error are
+not.
 
-The gyro GRU on its own makes long outages worse: `gru-preflight` and
-`gru-filter` diverge on V2_03 with 5 s gaps and on V2_01 with 10 s gaps.
+The gyro GRU on its own does not help in outages: with 5 s and 10 s gaps
+`gru-preflight` and `gru-filter` drift more than `msckf`.
 
 Per-gap numbers are in [`results/vio/outages.csv`](results/vio/outages.csv),
 the summary, including whole-flight errors, in
 [`results/vio/outages_summary.md`](results/vio/outages_summary.md).
+
+### Getting the velocity back after a gap
+
+After a 5 s gap the filter can come back with its velocity off by about
+1 m/s while its covariance says 0.1 m/s. Its χ² test then rejects nearly
+every new feature, because they disagree with its state, so the camera
+cannot pull the velocity back. On V2_03 the plain filter stayed wrong
+through the whole 5 s of vision before the next gap, and drifted further
+every time, up to 37 m.
+
+So when the camera comes back, the first second of images is used to solve
+for the velocity without the filter's velocity. With the attitude and
+biases from the filter, which stay good through a gap, the camera centre at
+time τ after the gap is p₀ + v₀τ + d(τ), where d is the IMU position
+change from a standing start. Every bearing to a feature then gives two
+equations that are linear in v₀ and the feature's position. Eliminating
+the features leaves a 3×3 system for v₀, the closed-form visual-inertial
+solution of Martinelli (2014) with the attitude known. That solution
+minimises distances in metres, which pulls it towards zero velocity as the
+pixel noise grows, so it is refined by Gauss-Newton on the reprojection
+error ([`qvio/recovery.py`](qvio/recovery.py)). If the filter accepted at
+most 40 features over that second, its velocity covariance is widened by
+the disagreement and the new velocity is applied with a standard deviation
+of 0.2 m/s per axis, which all but replaces it. The thresholds were chosen
+on the training and validation flights. On V2 the reset fires after 4 or 5
+of the 30 five-second gaps and after 5 to 7 of the 15 ten-second gaps, and
+never on V2_02.
+
+The same V2 runs without the reset:
+
+| variant | reset | 5 s median | 5 s, 90th pct. | 5 s, whole flight | 10 s median | 10 s, whole flight |
+|---|---|---|---|---|---|---|
+| `msckf` | no | 0.63 m | 17.9 m | 17.9 m | 2.49 m | 4.43 m |
+| `msckf` | yes | 0.61 m | 1.18 m | 1.26 m | 2.29 m | 1.80 m |
+| `msckf-speed-prior` | no | 0.71 m | 7.45 m | 10.3 m | 2.20 m | 2.46 m |
+| `msckf-speed-prior` | yes | 0.63 m | 1.10 m | 0.88 m | 1.87 m | 1.43 m |
+| `gru-velocity` | no | 0.79 m | 4.35 m | 5.49 m | 1.97 m | 2.19 m |
+| `gru-velocity` | yes | 0.65 m | 1.17 m | 0.93 m | 1.84 m | 1.40 m |
+
+Without the reset all three diverge on V2_03 with 5 s gaps, and the
+velocity GRU only limits the damage. With it none does. The numbers are in
+[`results/no_recovery/outages_summary.md`](results/no_recovery/outages_summary.md).
 
 ### Tilt from vanishing lines
 
@@ -276,9 +321,15 @@ given to the network separately:
   disagreement is added to the predicted variance (Lakshminarayanan et al.,
   2017). The variance is then scaled per axis so that it matches the errors
   on MH_05.
-- **In the filter.** While the camera is off, every tenth frame (twice a
+- **In the filter.** While the camera is off, every 20th frame (once a
   second), the prediction is applied as an EKF measurement of R<sup>T</sup>v,
   the body-frame velocity, with the Jacobians for attitude and velocity.
+  Once a second means no two predictions share IMU samples. Twice a second,
+  as at first, the overlapping windows had correlated errors that the
+  filter counted as independent, which made it too sure of its velocity.
+  The rate was chosen on the cross-room test below (machine-hall network on
+  V1), where once a second gave the lower median drift at both 5 s and
+  10 s.
   Training the three networks takes under an hour on a CPU, and the
   trained ensemble is in [`models/velocity_gru.pt`](models/velocity_gru.pt).
 
@@ -305,15 +356,19 @@ room as the V2 test flights. To see whether the network transfers to a room
 it has never seen, a second ensemble was trained on the machine hall only
 (MH_01 to MH_04) and flown on V1:
 
-| V1, network trained on the machine hall | 5 s median | 10 s median | 10 s, 90th pct. | 10 s, whole flight |
-|---|---|---|---|---|
-| `msckf` | 0.47 m | 2.71 m | 74.7 m | 93.6 m |
-| `gru-velocity` | **0.43 m** | **1.56 m** | **1.86 m** | **1.14 m** |
+| V1, network trained on the machine hall | 5 s median | 5 s, 90th pct. | 10 s median | 10 s, 90th pct. | 10 s, whole flight |
+|---|---|---|---|---|---|
+| `msckf` | 0.45 m | 0.80 m | 2.33 m | 11.2 m | 9.81 m |
+| `msckf-speed-prior` | 0.43 m | 0.77 m | **1.17 m** | 2.50 m | 1.52 m |
+| `gru-velocity` | **0.41 m** | **0.73 m** | 1.24 m | **2.10 m** | **1.18 m** |
 
-With 10 s gaps the plain filter diverges on V1_01 and V1_03; with the
-network no flight does, and the median drift drops by 42%. With 5 s gaps
-both recover and are about the same. That is despite a large bias: on
-V1_01 this network is off by 1.1 m/s along the body y axis on average.
+With 10 s gaps the plain filter diverges on V1_03 (whole-flight error
+26 m); with the network or the speed prior no flight does. With 5 s gaps
+the network drifts less than `msckf` in 69% of the gaps and less than the
+speed prior in 62%. At 10 s it has the smallest worst gaps and
+whole-flight error, but the speed prior has the smaller median. That is
+despite a large bias: on V1_01 this network is off by 1.1 m/s along the
+body y axis on average.
 Learning that bias while the camera is on (a running mean of the difference
 between the network and the filter) and removing it during the gaps was
 tried and did not help (in a test with the tracks carried across the gaps,
@@ -382,6 +437,9 @@ were dropped.
   projected onto the left nullspace of its position Jacobian. The surviving
   rows are stacked, compressed with QR and applied in Joseph form, with at
   most 50 features per update.
+- **After an outage.** The velocity is solved again from the first second
+  of images and the IMU, and replaces the filter's own if the filter
+  rejected most of the features in that second (see the results).
 - **Start-up.** The filter waits for one second of stillness (low-pass
   filtered IMU plus a median optical flow under 0.5 px), takes gravity and
   the gyro bias from it, and applies zero-velocity updates until the first
@@ -456,6 +514,7 @@ qvio/
   pipeline.py   cold start and the per-frame loop
   gru.py        the attitude GRU as a gyro model
   velocity.py   the velocity GRU and its control
+  recovery.py   velocity from the camera and IMU after an outage
   takeoff.py    takeoff detection and preflight calibration
   metrics.py    ATE, RPE, tilt, NEES, outage drift
 scripts/        data preparation, training, runs, scoring, reproduce.sh
@@ -474,12 +533,11 @@ tests/          unit tests and a simulated flight
 - V2 was never used for training or tuning in this repository, but it was
   looked at during the wider project, so it is a held-out test set rather
   than an untouched one.
-- With 5 s outages on V2_03, whether the filter gets its velocity back
-  between gaps is sensitive to small changes, and the plain filter and
-  both gyro-GRU variants do not. The velocity GRU prevents the divergence
-  there but does no better than a zero-velocity prior. It also has a
-  flight-long bias on V2, and its errors are correlated over about a
-  second while the filter treats each measurement as independent.
+- The velocity GRU's gains in outages are small at 5 s (a few centimetres
+  per gap), and at 10 s on V2 a zero-velocity prior does as well. The
+  network has a flight-long bias on V2. Without the velocity reset after
+  each gap, the filter diverges on V2_03 with 5 s gaps, with or without
+  the network.
 - The filter is monocular and written for clarity, not speed. It is slower
   than OpenVINS and has no loop closure or persistent map.
 
@@ -497,6 +555,8 @@ tests/          unit tests and a simulated flight
 - W. Liu et al., *TLIO: Tight learned inertial odometry*, IEEE RA-L 2020.
 - G. Cioffi et al., *Learned inertial odometry for autonomous drone
   racing*, IEEE RA-L 2023.
+- A. Martinelli, *Closed-form solution of visual-inertial structure from
+  motion*, IJCV 2014.
 - R. Leishman et al., *Quadrotors and accelerometers: State estimation with
   an improved dynamic model*, IEEE Control Systems Magazine 2014.
 - B. Lakshminarayanan, A. Pritzel and C. Blundell, *Simple and scalable
