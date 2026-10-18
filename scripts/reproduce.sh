@@ -72,9 +72,21 @@ step "velocity GRU in an unseen room"
 python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-speed-prior gru-velocity --sequences $V1 \
     --outage 5 10 --velocity-model models/velocity_gru_mh.pt --out runs/cross_room --jobs "$JOBS"
 
+step "velocity measurements twice a second instead of once"
+# shellcheck disable=SC2086
+python scripts/run_vio.py --euroc "$EUROC" --variant msckf-speed-prior gru-velocity \
+    --sequences $V2 --outage 5 10 --velocity-every 10 --out runs/twice_per_second --jobs "$JOBS"
+# shellcheck disable=SC2086
+python scripts/run_vio.py --euroc "$EUROC" --variant msckf-speed-prior gru-velocity --sequences $V1 \
+    --outage 5 10 --velocity-model models/velocity_gru_mh.pt --velocity-every 10 \
+    --out runs/cross_room_twice_per_second --jobs "$JOBS"
+
 step "scoring"
 python scripts/evaluate.py --euroc "$EUROC" ${OPENVINS:+--openvins "$OPENVINS"}
 python scripts/evaluate.py --euroc "$EUROC" --runs runs/no_recovery --out results/no_recovery
 python scripts/evaluate.py --euroc "$EUROC" --runs runs/cross_room --out results/cross_room
+python scripts/evaluate.py --euroc "$EUROC" --runs runs/twice_per_second --out results/twice_per_second
+python scripts/evaluate.py --euroc "$EUROC" --runs runs/cross_room_twice_per_second \
+    --out results/cross_room_twice_per_second
 
 step "done; tables are in results/, the full log in logs/reproduce.log"
