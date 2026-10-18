@@ -1,0 +1,325 @@
+diff --git a/ov_msckf/src/core/VioManager.cpp b/ov_msckf/src/core/VioManager.cpp
+index 6a0d7b9..65f1616 100644
+--- a/ov_msckf/src/core/VioManager.cpp
++++ b/ov_msckf/src/core/VioManager.cpp
+@@ -47,6 +47,12 @@ using namespace ov_core;
+ using namespace ov_type;
+ using namespace ov_msckf;
+ 
++std::shared_ptr<FeatureDatabase> VioManager::get_feature_database() { return trackFEATS->get_feature_database(); }
++
++std::unordered_map<size_t, std::vector<size_t>> VioManager::get_last_feature_ids() { return trackFEATS->get_last_ids(); }
++
++std::unordered_map<size_t, std::vector<cv::KeyPoint>> VioManager::get_last_feature_observations() { return trackFEATS->get_last_obs(); }
++
+ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false), thread_init_success(false) {
+ 
+   // Nice startup message
+@@ -522,7 +528,9 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
+   // NOTE: this should only really be used if you want to track a lot of features, or have limited computational resources
+   if ((int)featsup_MSCKF.size() > state->_options.max_msckf_in_update)
+     featsup_MSCKF.erase(featsup_MSCKF.begin(), featsup_MSCKF.end() - state->_options.max_msckf_in_update);
++  last_features_MSCKF_candidates = featsup_MSCKF;
+   updaterMSCKF->update(state, featsup_MSCKF);
++  last_features_MSCKF_accepted = featsup_MSCKF;
+   propagator->invalidate_cache();
+   rT4 = boost::posix_time::microsec_clock::local_time();
+ 
+diff --git a/ov_msckf/src/core/VioManager.h b/ov_msckf/src/core/VioManager.h
+index 3fd7089..2d659da 100644
+--- a/ov_msckf/src/core/VioManager.h
++++ b/ov_msckf/src/core/VioManager.h
+@@ -32,12 +32,15 @@
+ #include <string>
+ 
+ #include "VioManagerOptions.h"
++#include "update/UpdaterMSCKF.h"
+ 
+ namespace ov_core {
+ struct ImuData;
+ struct CameraData;
+ class TrackBase;
+ class FeatureInitializer;
++class FeatureDatabase;
++class Feature;
+ } // namespace ov_core
+ namespace ov_init {
+ class InertialInitializer;
+@@ -47,7 +50,6 @@ namespace ov_msckf {
+ 
+ class State;
+ class StateHelper;
+-class UpdaterMSCKF;
+ class UpdaterSLAM;
+ class UpdaterZeroVelocity;
+ class Propagator;
+@@ -136,6 +138,30 @@ public:
+     feat_tracks_uvd = active_tracks_uvd;
+   }
+ 
++  /// Read-only export access to the sparse tracker database.
++  std::shared_ptr<ov_core::FeatureDatabase> get_feature_database();
++
++  /// Read-only export access to the tracker's most recent feature IDs.
++  std::unordered_map<size_t, std::vector<size_t>> get_last_feature_ids();
++
++  /// Read-only export access to the tracker's most recent keypoints.
++  std::unordered_map<size_t, std::vector<cv::KeyPoint>> get_last_feature_observations();
++
++  /// Candidate tracks presented to the most recent MSCKF update.
++  std::vector<std::shared_ptr<ov_core::Feature>> get_last_msckf_candidates() {
++    return last_features_MSCKF_candidates;
++  }
++
++  /// Candidate tracks that passed triangulation and chi-square gating.
++  std::vector<std::shared_ptr<ov_core::Feature>> get_last_msckf_accepted() {
++    return last_features_MSCKF_accepted;
++  }
++
++  /// Per-track read-only diagnostics from the latest MSCKF update.
++  std::vector<MsckfFeatureDiagnostic> get_last_msckf_diagnostics() {
++    return updaterMSCKF->last_feature_diagnostics();
++  }
++
+ protected:
+   /**
+    * @brief Given a new set of camera images, this will track them.
+@@ -200,6 +226,10 @@ protected:
+   /// Our MSCKF feature updater
+   std::shared_ptr<UpdaterMSCKF> updaterMSCKF;
+ 
++  /// Read-only export snapshots; these do not participate in estimation.
++  std::vector<std::shared_ptr<ov_core::Feature>> last_features_MSCKF_candidates;
++  std::vector<std::shared_ptr<ov_core::Feature>> last_features_MSCKF_accepted;
++
+   /// Our SLAM/ARUCO feature updater
+   std::shared_ptr<UpdaterSLAM> updaterSLAM;
+ 
+diff --git a/ov_msckf/src/update/UpdaterMSCKF.cpp b/ov_msckf/src/update/UpdaterMSCKF.cpp
+index 9a00ade..f0a7346 100644
+--- a/ov_msckf/src/update/UpdaterMSCKF.cpp
++++ b/ov_msckf/src/update/UpdaterMSCKF.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "feat/Feature.h"
+ #include "feat/FeatureInitializer.h"
++#include "cam/CamBase.h"
+ #include "state/State.h"
+ #include "state/StateHelper.h"
+ #include "types/LandmarkRepresentation.h"
+@@ -34,11 +35,82 @@
+ 
+ #include <boost/date_time/posix_time/posix_time.hpp>
+ #include <boost/math/distributions/chi_squared.hpp>
++#include <algorithm>
++#include <numeric>
++#include <unordered_map>
+ 
+ using namespace ov_core;
+ using namespace ov_type;
+ using namespace ov_msckf;
+ 
++namespace {
++
++size_t diagnostic_observation_count(const Feature &feature) {
++  size_t count = 0;
++  for (const auto &item : feature.timestamps)
++    count += item.second.size();
++  return count;
++}
++
++void diagnostic_time_range(const Feature &feature, double &first, double &last) {
++  first = std::numeric_limits<double>::infinity();
++  last = -std::numeric_limits<double>::infinity();
++  for (const auto &item : feature.timestamps) {
++    for (double timestamp : item.second) {
++      first = std::min(first, timestamp);
++      last = std::max(last, timestamp);
++    }
++  }
++}
++
++void compute_export_diagnostics(
++    const std::shared_ptr<State> &state, const std::shared_ptr<Feature> &feature,
++    std::unordered_map<size_t, std::unordered_map<double, FeatureInitializer::ClonePose>> &clones_cam,
++    MsckfFeatureDiagnostic &diagnostic) {
++  diagnostic.position_global = feature->p_FinG;
++  diagnostic.triangulation_success = feature->p_FinG.allFinite();
++  if (!diagnostic.triangulation_success)
++    return;
++
++  Eigen::Matrix3d bearing_normal_matrix = Eigen::Matrix3d::Zero();
++  std::vector<double> reprojection_errors;
++  for (const auto &camera_item : feature->timestamps) {
++    const size_t camera_id = camera_item.first;
++    for (size_t index = 0; index < camera_item.second.size(); ++index) {
++      auto &clone = clones_cam.at(camera_id).at(camera_item.second.at(index));
++      const Eigen::Vector3d point_camera = clone.Rot() * (feature->p_FinG - clone.pos());
++      ++diagnostic.depth_check_count;
++      if (point_camera(2) > 0)
++        ++diagnostic.positive_depth_count;
++      if (std::abs(point_camera(2)) > 1e-12) {
++        const Eigen::Vector2d normalized = point_camera.head<2>() / point_camera(2);
++        const Eigen::Vector2d predicted = state->_cam_intrinsics_cameras.at(camera_id)->distort_d(normalized);
++        reprojection_errors.push_back((predicted - feature->uvs.at(camera_id).at(index).cast<double>()).norm());
++      }
++      Eigen::Vector3d bearing(feature->uvs_norm.at(camera_id).at(index)(0),
++                              feature->uvs_norm.at(camera_id).at(index)(1), 1.0);
++      bearing = clone.Rot().transpose() * bearing.normalized();
++      const Eigen::Matrix3d projector = Eigen::Matrix3d::Identity() - bearing * bearing.transpose();
++      bearing_normal_matrix += projector;
++    }
++  }
++  const Eigen::Vector3d singular = Eigen::JacobiSVD<Eigen::Matrix3d>(bearing_normal_matrix).singularValues();
++  diagnostic.triangulation_condition =
++      singular(2) > std::numeric_limits<double>::epsilon() ? singular(0) / singular(2)
++                                                          : std::numeric_limits<double>::infinity();
++  if (!reprojection_errors.empty()) {
++    std::sort(reprojection_errors.begin(), reprojection_errors.end());
++    diagnostic.reprojection_mean_px =
++        std::accumulate(reprojection_errors.begin(), reprojection_errors.end(), 0.0) / reprojection_errors.size();
++    diagnostic.reprojection_median_px = reprojection_errors[reprojection_errors.size() / 2];
++    const size_t p95_index =
++        std::min(reprojection_errors.size() - 1, static_cast<size_t>(std::ceil(0.95 * reprojection_errors.size()) - 1));
++    diagnostic.reprojection_p95_px = reprojection_errors[p95_index];
++  }
++}
++
++} // namespace
++
+ UpdaterMSCKF::UpdaterMSCKF(UpdaterOptions &options, ov_core::FeatureInitializerOptions &feat_init_options) : _options(options) {
+ 
+   // Save our raw pixel noise squared
+@@ -57,10 +129,22 @@ UpdaterMSCKF::UpdaterMSCKF(UpdaterOptions &options, ov_core::FeatureInitializerO
+ 
+ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_ptr<Feature>> &feature_vec) {
+ 
++  last_diagnostics.clear();
++
+   // Return if no features
+   if (feature_vec.empty())
+     return;
+ 
++  std::unordered_map<size_t, size_t> diagnostic_index;
++  for (const auto &feature : feature_vec) {
++    MsckfFeatureDiagnostic diagnostic;
++    diagnostic.feature_id = feature->featid;
++    diagnostic.observation_count = diagnostic_observation_count(*feature);
++    diagnostic_time_range(*feature, diagnostic.first_timestamp, diagnostic.last_timestamp);
++    diagnostic_index[feature->featid] = last_diagnostics.size();
++    last_diagnostics.push_back(diagnostic);
++  }
++
+   // Start timing
+   boost::posix_time::ptime rT0, rT1, rT2, rT3, rT4, rT5;
+   rT0 = boost::posix_time::microsec_clock::local_time();
+@@ -86,6 +170,7 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
+ 
+     // Remove if we don't have enough
+     if (ct_meas < 2) {
++      last_diagnostics.at(diagnostic_index.at((*it0)->featid)).rejection_reason = "insufficient_clone_observations";
+       (*it0)->to_delete = true;
+       it0 = feature_vec.erase(it0);
+     } else {
+@@ -134,10 +219,15 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
+ 
+     // Remove the feature if not a success
+     if (!success_tri || !success_refine) {
++      auto &diagnostic = last_diagnostics.at(diagnostic_index.at((*it1)->featid));
++      diagnostic.rejection_reason = success_tri ? "gauss_newton_refinement_failed" : "triangulation_failed";
+       (*it1)->to_delete = true;
+       it1 = feature_vec.erase(it1);
+       continue;
+     }
++    auto &diagnostic = last_diagnostics.at(diagnostic_index.at((*it1)->featid));
++    compute_export_diagnostics(state, *it1, clones_cam, diagnostic);
++    diagnostic.rejection_reason = "chi2_not_evaluated";
+     it1++;
+   }
+   rT2 = boost::posix_time::microsec_clock::local_time();
+@@ -210,6 +300,9 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
+     Eigen::MatrixXd S = H_x * P_marg * H_x.transpose();
+     S.diagonal() += _options.sigma_pix_sq * Eigen::VectorXd::Ones(S.rows());
+     double chi2 = res.dot(S.llt().solve(res));
++    auto &diagnostic = last_diagnostics.at(diagnostic_index.at((*it2)->featid));
++    diagnostic.innovation_chi2 = chi2;
++    diagnostic.innovation_dof = res.rows();
+ 
+     // Get our threshold (we precompute up to 500 but handle the case that it is more)
+     double chi2_check;
+@@ -223,6 +316,7 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
+ 
+     // Check if we should delete or not
+     if (chi2 > _options.chi2_multipler * chi2_check) {
++      diagnostic.rejection_reason = "chi2_gate";
+       (*it2)->to_delete = true;
+       it2 = feature_vec.erase(it2);
+       // PRINT_DEBUG("featid = %d\n", feat.featid);
+@@ -232,6 +326,8 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
+       // PRINT_DEBUG(ss.str().c_str());
+       continue;
+     }
++    diagnostic.accepted = true;
++    diagnostic.rejection_reason = "none";
+ 
+     // We are good!!! Append to our large H vector
+     size_t ct_hx = 0;
+diff --git a/ov_msckf/src/update/UpdaterMSCKF.h b/ov_msckf/src/update/UpdaterMSCKF.h
+index 149ea45..91330d6 100644
+--- a/ov_msckf/src/update/UpdaterMSCKF.h
++++ b/ov_msckf/src/update/UpdaterMSCKF.h
+@@ -24,6 +24,8 @@
+ 
+ #include <Eigen/Eigen>
+ #include <memory>
++#include <string>
++#include <vector>
+ 
+ #include "feat/FeatureInitializerOptions.h"
+ 
+@@ -38,6 +40,27 @@ namespace ov_msckf {
+ 
+ class State;
+ 
++/// Read-only telemetry for a temporary feature considered by the latest
++/// MSCKF update. It is never used by the estimator.
++struct MsckfFeatureDiagnostic {
++  size_t feature_id = 0;
++  size_t observation_count = 0;
++  double first_timestamp = -1;
++  double last_timestamp = -1;
++  Eigen::Vector3d position_global = Eigen::Vector3d::Zero();
++  bool triangulation_success = false;
++  size_t positive_depth_count = 0;
++  size_t depth_check_count = 0;
++  double triangulation_condition = -1;
++  double reprojection_mean_px = -1;
++  double reprojection_median_px = -1;
++  double reprojection_p95_px = -1;
++  double innovation_chi2 = -1;
++  int innovation_dof = 0;
++  bool accepted = false;
++  std::string rejection_reason = "not_evaluated";
++};
++
+ /**
+  * @brief Will compute the system for our sparse features and update the filter.
+  *
+@@ -67,6 +90,8 @@ public:
+    */
+   void update(std::shared_ptr<State> state, std::vector<std::shared_ptr<ov_core::Feature>> &feature_vec);
+ 
++  const std::vector<MsckfFeatureDiagnostic> &last_feature_diagnostics() const { return last_diagnostics; }
++
+ protected:
+   /// Options used during update
+   UpdaterOptions _options;
+@@ -76,6 +101,8 @@ protected:
+ 
+   /// Chi squared 95th percentile table (lookup would be size of residual)
+   std::map<int, double> chi_squared_table;
++
++  std::vector<MsckfFeatureDiagnostic> last_diagnostics;
+ };
+ 
+ } // namespace ov_msckf
