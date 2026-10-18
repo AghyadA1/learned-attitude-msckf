@@ -1,12 +1,14 @@
 """Calibrate or retrain the 50 ms attitude GRU for use inside the filter.
 
-Two jobs, both reading EuRoC directly:
+Three jobs, all reading EuRoC directly:
 
-  calibrate   measure the per-window rotation error of a checkpoint (or of
-              the plain gyro) on the validation sequence and store it as the
-              gyro noise the filter should use with it.
+  calibrate   measure the per-window rotation error of a checkpoint on the
+              validation sequence and store it as the gyro noise the filter
+              should use with it.
   train       fine-tune a checkpoint with ground-truth bias as the bias input
               and a second head that predicts the error variance.
+  compare     per-window error of plain gyro integration (rectangle and
+              midpoint rule) and of the checkpoints, on validation and test.
 
 The bias input is the point. The original network always saw the preflight
 bias estimate and learned to cancel its constant error (about 0.1 deg/s);
@@ -14,9 +16,9 @@ inside the filter that job belongs to the bias state. Training against the
 ground-truth bias leaves the network only what the bias cannot explain.
 
 Examples
-  python scripts/train_gru.py calibrate --euroc DATA --out models/gyro_calibrated.json
   python scripts/train_gru.py calibrate --euroc DATA --checkpoint models/gru_preflight.pt --out models/gru_preflight_cal.pt
   python scripts/train_gru.py train --euroc DATA --init models/gru_preflight.pt --out models/gru_filter.pt
+  python scripts/train_gru.py compare --euroc DATA original=models/gru_preflight.pt fine-tuned=models/gru_filter.pt
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from scipy.spatial.transform import Rotation, Slerp
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qvio import so3  # noqa: E402
-from qvio.euroc import TRAIN, VALIDATION, load_groundtruth, load_sequence  # noqa: E402
+from qvio.euroc import TEST, TRAIN, VALIDATION, load_groundtruth, load_sequence  # noqa: E402
 from qvio.gru import WINDOW, GRUGyroModel, build_model, integrate_rectangle  # noqa: E402
 
 
@@ -103,30 +105,49 @@ def calibrate(args) -> None:
     rows = [summarize("plain gyro", rotation_errors(data["q_mid"], data["q_gt"]), data["duration"])]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if args.checkpoint:
-        import torch
+    import torch
 
-        model = GRUGyroModel(args.checkpoint, window_variance=np.ones(3))
-        model.variance_scale = np.ones(3)
-        q, var = model.predict(data["X"][:, :, :3], data["X"][:, :, 3:], data["bias"], data["duration"])
-        e = rotation_errors(q, data["q_gt"])
-        rows.append(summarize("GRU", e, data["duration"]))
-        ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-        ck["window_variance"] = np.asarray(rows[-1]["window_variance_rad2"])
-        if var is not None:
-            # The head was fitted on the training sequences; rescale it so the
-            # normalised squared error on the validation sequence averages 1.
-            ck["variance_scale"] = np.mean(e**2 / var, axis=0)
-            rows[-1]["variance_scale"] = [float(x) for x in ck["variance_scale"]]
-            print(f"variance head scale on {VALIDATION[0]}: {np.round(ck['variance_scale'], 3)}")
-        ck["calibration"] = rows[-1]
-        torch.save(ck, out)
-    else:
-        out.write_text(json.dumps(rows[0], indent=2) + "\n")
+    model = GRUGyroModel(args.checkpoint, window_variance=np.ones(3))
+    model.variance_scale = np.ones(3)
+    q, var = model.predict(data["X"][:, :, :3], data["X"][:, :, 3:], data["bias"], data["duration"])
+    e = rotation_errors(q, data["q_gt"])
+    rows.append(summarize("GRU", e, data["duration"]))
+    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    ck["window_variance"] = np.asarray(rows[-1]["window_variance_rad2"])
+    if var is not None:
+        # The head was fitted on the training sequences; rescale it so the
+        # normalised squared error on the validation sequence averages 1.
+        ck["variance_scale"] = np.mean(e**2 / var, axis=0)
+        rows[-1]["variance_scale"] = [float(x) for x in ck["variance_scale"]]
+        print(f"variance head scale on {VALIDATION[0]}: {np.round(ck['variance_scale'], 3)}")
+    ck["calibration"] = rows[-1]
+    torch.save(ck, out)
     print(f"wrote {out}")
     if args.report:
         Path(args.report).parent.mkdir(parents=True, exist_ok=True)
         Path(args.report).write_text(json.dumps(rows, indent=2) + "\n")
+
+
+def compare(args) -> None:
+    """Per-window error with the reference bias removed, for every method."""
+    rows = []
+    for split, names in (("val", VALIDATION), ("test", TEST)):
+        d = load_split(args.euroc, names, Path(args.cache))
+        g = d["X"][:, :, :3] - d["bias"][:, None, :]
+        methods = {"gyro (rectangle rule)": integrate_rectangle(g, d["duration"]),
+                   "gyro (midpoint rule)": d["q_mid"]}
+        for spec in args.checkpoints:
+            name, _, path = spec.partition("=")
+            methods[f"GRU {name}"], _ = GRUGyroModel(path, window_variance=np.ones(3)).predict(
+                d["X"][:, :, :3], d["X"][:, :, 3:], d["bias"], d["duration"])
+        for method, q in methods.items():
+            angle = np.degrees(np.linalg.norm(rotation_errors(q, d["q_gt"]), axis=1))
+            rows.append(f"{split},{method},{len(angle)},{angle.mean():.5f},{np.percentile(angle, 95):.5f}")
+            print(f"{split:5s} {method:22s} mean {angle.mean():.4f} deg, p95 {np.percentile(angle, 95):.4f} deg")
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("split,method,windows,mean_error_deg,p95_error_deg\n" + "\n".join(rows) + "\n")
+    print(f"wrote {out}")
 
 
 def train(args) -> None:
@@ -229,14 +250,17 @@ def _rotvec_to_quat_torch(v):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="job", required=True)
-    for name in ("calibrate", "train"):
+    for name in ("calibrate", "train", "compare"):
         p = sub.add_parser(name)
         p.add_argument("--euroc", required=True, help="folder with one sub-folder per EuRoC sequence")
         p.add_argument("--cache", default="cache/gru_windows")
     c = sub.choices["calibrate"]
-    c.add_argument("--checkpoint", help="network to calibrate; without it only the plain gyro is measured")
-    c.add_argument("--out", required=True, help="calibrated checkpoint (.pt) or plain-gyro noise (.json)")
-    c.add_argument("--report", help="optional JSON with the error statistics of both")
+    c.add_argument("--checkpoint", required=True, help="network to calibrate")
+    c.add_argument("--out", required=True, help="calibrated checkpoint (.pt)")
+    c.add_argument("--report", help="optional JSON with the error statistics of the gyro and the network")
+    m = sub.choices["compare"]
+    m.add_argument("checkpoints", nargs="*", help="NAME=PATH for each network to include")
+    m.add_argument("--out", default="results/gru/window_errors.csv")
     t = sub.choices["train"]
     t.add_argument("--init", required=True)
     t.add_argument("--out", required=True)
@@ -248,7 +272,7 @@ def main() -> None:
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--sequences", nargs="*", help="training sequences (default: the standard split)")
     args = parser.parse_args()
-    calibrate(args) if args.job == "calibrate" else train(args)
+    {"calibrate": calibrate, "train": train, "compare": compare}[args.job](args)
 
 
 if __name__ == "__main__":

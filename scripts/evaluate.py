@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from qvio import euroc, metrics  # noqa: E402
 
-ORDER = ["openvins", "msckf", "msckf-cal", "gru-preflight", "gru-filter"]
+ORDER = ["openvins", "msckf", "msckf-gru-noise", "gru-preflight", "gru-filter"]
 
 
 def markdown(df: pd.DataFrame, index: bool = False, digits: int = 4) -> str:
@@ -81,16 +81,19 @@ def main() -> None:
     gts, full, outages = {}, [], []
     for variant, outage, name, run in runs:
         gt = gts.setdefault(name, euroc.load_groundtruth(args.euroc, name))
-        if outage == 0:
-            row = metrics.evaluate_run(run, gt)
-            row.update(variant=variant, sequence=name, split=split_of(name),
-                       start_s=float((int(run["start_t"]) - int(gt.t[0])) * 1e-9),
-                       runtime_s=float(run["runtime_s"]))
-            full.append(row)
-        else:
-            for row in metrics.evaluate_outages(run, gt):
-                row.update(variant=variant, sequence=name, split=split_of(name), outage_s=outage)
-                outages.append(row)
+        try:
+            if outage == 0:
+                row = metrics.evaluate_run(run, gt)
+                row.update(variant=variant, sequence=name, split=split_of(name),
+                           start_s=float((int(run["start_t"]) - int(gt.t[0])) * 1e-9),
+                           runtime_s=float(run["runtime_s"]))
+                full.append(row)
+            else:
+                for row in metrics.evaluate_outages(run, gt):
+                    row.update(variant=variant, sequence=name, split=split_of(name), outage_s=outage)
+                    outages.append(row)
+        except Exception as e:  # one bad run should not hide the others
+            print(f"could not score {variant} {name} (outage {outage:g} s): {e}")
 
     if full:
         df = pd.DataFrame(full)

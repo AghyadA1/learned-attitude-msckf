@@ -125,24 +125,30 @@ def relative_errors(t, p_est, R_est, p_gt, R_gt, delta_s: float, pairs=None):
 
 
 def evaluate_outages(run: dict, gt: GroundTruth) -> list[dict]:
-    """Drift accumulated over each camera outage in a run."""
+    """Drift accumulated over each camera outage in a run.
+
+    Outages that begin or end outside the ground-truth time range are skipped.
+    """
     hidden = run["hidden"]
-    t = run["t"]
-    keep, p_gt, R_gt, _ = interpolate_groundtruth(gt, t)
-    if not keep.all():
-        raise ValueError("outage evaluation needs ground truth over the whole run")
-    p_est = run["p"]
-    R_est = np.asarray([so3.quat_to_rot(q) for q in run["q"]])
+    keep, p_gt, R_gt, _ = interpolate_groundtruth(gt, run["t"])
+    # Row of each run state in the ground-truth arrays, -1 where there is none.
+    row = np.full(len(keep), -1)
+    row[keep] = np.arange(keep.sum())
+    t = run["t"][keep]
+    p_est = run["p"][keep]
+    R_est = np.asarray([so3.quat_to_rot(q) for q in run["q"][keep]])
     rows = []
     edges = np.diff(hidden.astype(int))
     starts = np.flatnonzero(edges == 1) + 1
     ends = np.flatnonzero(edges == -1)
     for a, b in zip(starts, ends):
-        i, j = a - 1, b          # last state with vision, last state without
+        i, j = row[a - 1], row[b]      # last state with vision, last state without
+        if i < 0 or j < 0:
+            continue
         trans, rot = relative_errors(t, p_est, R_est, p_gt, R_gt, 0.0, pairs=[(i, j)])
         tilt = tilt_error_deg(R_est[[i, j]], R_gt[[i, j]])
         rows.append({
-            "start_s": (t[i] - t[0]) * 1e-9,
+            "start_s": (run["t"][a - 1] - run["t"][0]) * 1e-9,
             "duration_s": (t[j] - t[i]) * 1e-9,
             "translation_drift_m": float(trans[0]),
             "rotation_drift_deg": float(rot[0]),

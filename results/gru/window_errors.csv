@@ -1,0 +1,9 @@
+split,method,windows,mean_error_deg,p95_error_deg
+val,gyro (rectangle rule),2220,0.01686,0.03512
+val,gyro (midpoint rule),2220,0.00087,0.00216
+val,GRU original,2220,0.01013,0.02033
+val,GRU fine-tuned,2220,0.00751,0.01512
+test,gyro (rectangle rule),6029,0.03205,0.08341
+test,gyro (midpoint rule),6029,0.01839,0.07043
+test,GRU original,6029,0.02474,0.07168
+test,GRU fine-tuned,6029,0.02312,0.07166

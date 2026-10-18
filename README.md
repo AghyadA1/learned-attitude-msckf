@@ -65,43 +65,91 @@ predicts a small rotation, at most 0.15 rad per axis, that is applied after
 plain integration. The first version used the raw gyro as its prior and
 drifted badly on V2_03; subtracting the preflight bias first fixed that.
 
-It cuts the 50 ms error by 23% and the end-of-flight error by 16%, but
-over one second it is no better than integration, and integrating with the
-reference bias is far better over a whole flight. Most of the long-term
-drift is bias, which a 50 ms window cannot see. That is the reason to put
-the network inside a filter that estimates the bias, rather than use it on
-its own. Per-split numbers are in
+Per-split numbers are in
 [`results/gru/attitude_only_errors.csv`](results/gru/attitude_only_errors.csv).
+In that evaluation the gyro was integrated with the rectangle rule, holding
+each 5 ms sample constant until the next one, and that is what the network
+beat by 23%. The midpoint rule, which the filter uses, does better than the
+network without learning anything:
+
+| one 50 ms window, reference bias removed [deg] | MH_05 (validation) | V2 (test) |
+|---|---|---|
+| gyro, rectangle rule | 0.0169 | 0.0321 |
+| GRU, original | 0.0101 | 0.0247 |
+| GRU, fine-tuned for the filter | 0.0075 | 0.0231 |
+| gyro, midpoint rule | **0.0009** | **0.0184** |
+
+The rectangle-rule row matches the original evaluation to four decimals, so
+the two tables measure the same thing
+([`results/gru/window_errors.csv`](results/gru/window_errors.csv)). Most of
+what the network learned is a better integration rule. The midpoint rule's
+very close match on MH_05 is probably helped by EuRoC's reference attitude
+being fitted to this same IMU (see the caveats), but it also wins on V2.
+
+Over longer horizons the bias dominates, and a 50 ms window cannot see it.
+That is the reason to try the network inside a filter that estimates the
+bias, rather than on its own.
 
 ### Full visual-inertial odometry
 
-OpenVINS baseline, 4-DoF alignment (yaw and translation):
-
-| sequence | ATE RMSE [m] | attitude, mean [deg] | velocity RMSE [m/s] |
-|---|---|---|---|
-| V2_01_easy | 0.150 | 1.13 | 0.053 |
-| V2_02_medium | 0.120 | 1.29 | 0.047 |
-| V2_03_difficult | 0.162 | 1.25 | 0.071 |
-| mean | 0.144 | 1.22 | 0.057 |
-
-The other eight sequences are in
-[`results/openvins/euroc_openvins_v2.7.csv`](results/openvins/euroc_openvins_v2.7.csv);
-MH_03 (2.15 m) is its weak spot. How it was built and configured is in
-[`baselines/openvins`](baselines/openvins).
-
+All trajectories are aligned to ground truth with a yaw rotation and a
+translation (4-DoF). The OpenVINS baseline is described in
+[`baselines/openvins`](baselines/openvins), with all eleven sequences in
+[`results/openvins/euroc_openvins_v2.7.csv`](results/openvins/euroc_openvins_v2.7.csv).
 The Python filter runs in four variants, all from the same cold start:
 
 | variant | gyro model | gyro noise |
 |---|---|---|
 | `msckf` | plain gyro | sensor datasheet |
-| `msckf-cal` | plain gyro | measured per interval on MH_05 |
-| `gru-preflight` | the GRU above, unchanged | measured on MH_05 |
+| `msckf-gru-noise` | plain gyro | the fine-tuned GRU's error, measured on MH_05 |
+| `gru-preflight` | the GRU above, unchanged | its error, measured on MH_05 |
 | `gru-filter` | the GRU fine-tuned for the filter | predicted by the network, scaled on MH_05 |
 
-`msckf-cal` is the fair comparison for the GRU variants, since it gets the
-same kind of measured noise. Each variant also runs with the camera switched
-off for 1, 2 or 5 s every 10 s, which is where a better gyro should matter
-most. `scripts/reproduce.sh` produces the tables and plots in `results/vio/`.
+`msckf-gru-noise` is the control. It tells the filter the gyro is as noisy
+as the fine-tuned GRU, but integrates the plain gyro. Mean over the three V2
+sequences:
+
+| | ATE RMSE [m] | attitude RMSE [deg] | velocity RMSE [m/s] | attitude NEES |
+|---|---|---|---|---|
+| OpenVINS v2.7 | 0.144 | **1.33** | 0.057 | |
+| `msckf` | 0.138 | 1.60 | 0.058 | 513 |
+| `msckf-gru-noise` | **0.128** | 1.40 | **0.051** | 234 |
+| `gru-preflight` | 0.144 | 1.46 | 0.052 | 220 |
+| `gru-filter` | 0.131 | 1.37 | 0.052 | 231 |
+
+<p align="center">
+  <img src="results/vio/trajectories_v2.png" width="100%" alt="Estimated and true trajectories on V2">
+</p>
+
+The Python filter is as accurate as OpenVINS on V2. The fine-tuned GRU
+improves on datasheet noise (0.131 m against 0.138 m), but the control does
+just as well, so the gain comes from the larger gyro noise and not from the
+network's rotation. The training sequences say the same: mean ATE 0.30 m for
+`msckf`, 0.19 m for the control and 0.20 m and 0.21 m for the two GRU
+variants (OpenVINS 0.50 m, most of it on MH_03). Per-sequence numbers are in
+[`results/vio/ate_per_sequence.md`](results/vio/ate_per_sequence.md) and
+[`results/vio/full_sequences.csv`](results/vio/full_sequences.csv).
+
+The larger noise helps because the filter is overconfident on real data. Its
+attitude NEES is in the hundreds where a consistent filter gives 3, mostly
+from tilt: it settles about half a degree away from EuRoC's reference tilt
+while its own standard deviation is a few hundredths of a degree. The same
+filter is consistent in simulation (below), so the extra error probably
+comes from something the model leaves out, such as calibration or timing
+errors.
+
+Two problems turned up on the way to these numbers. The filter used to drop
+features with less than 1° of parallax, so during a ten-second hover on
+MH_04 it received no updates and drifted 7 m; without that gate MH_04 is at
+0.36 m, level with OpenVINS. And measuring the plain gyro's noise against
+EuRoC's reference gives a variance 4 to 50 times below the datasheet's,
+probably because the reference attitude is fitted to the same IMU. A filter
+given that noise diverged on V2_03, which is why the control borrows the
+GRU's noise instead.
+
+Each variant also runs with the camera switched off for 1, 2 or 5 s every
+10 s, which is where a better gyro should matter most;
+`scripts/reproduce.sh` writes those results to `results/vio/outages_summary.md`.
 
 ### Tilt from vanishing lines
 
@@ -155,8 +203,8 @@ were dropped.
 - **Front end.** KLT on CLAHE-equalised images, a 1 px forward-backward
   check, fundamental-matrix RANSAC, and grid-based top-up to 200 features.
 - **Update.** A feature is used when its track ends or reaches the oldest
-  clone. It is triangulated (DLT, then Gauss-Newton), checked for depth,
-  parallax and reprojection error, gated on its own with a 95% χ² test, and
+  clone. It is triangulated (DLT, then Gauss-Newton), checked for depth and
+  reprojection error, gated on its own with a 95% χ² test, and
   projected onto the left nullspace of its position Jacobian. The surviving
   rows are stacked, compressed with QR and applied in Joseph form, with at
   most 50 features per update.
@@ -167,7 +215,7 @@ were dropped.
 
 The tests include a simulated flight with known landmarks. Over 12 random
 seeds the average attitude and position NEES are 2.9 and 3.2, close to the
-3 of a consistent filter.
+3 of a consistent filter. On EuRoC it is not consistent; see the results.
 
 ## Running it
 
@@ -208,10 +256,10 @@ the same code.
 
 ```bash
 python scripts/detect_takeoff.py --euroc data/euroc --video
-python scripts/train_gru.py calibrate --euroc data/euroc --out models/gyro_calibrated.json
 python scripts/train_gru.py calibrate --euroc data/euroc --checkpoint models/gru_preflight.pt --out models/gru_preflight_cal.pt
 python scripts/train_gru.py train --euroc data/euroc --init models/gru_preflight.pt --out models/gru_filter.pt
 python scripts/train_gru.py calibrate --euroc data/euroc --checkpoint models/gru_filter.pt --out models/gru_filter_cal.pt
+python scripts/train_gru.py compare --euroc data/euroc original=models/gru_preflight.pt fine-tuned=models/gru_filter.pt
 python scripts/run_vio.py --euroc data/euroc --variant msckf gru-filter --sequences V2_01_easy
 python scripts/evaluate.py --euroc data/euroc
 ```

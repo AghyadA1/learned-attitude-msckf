@@ -40,7 +40,6 @@ class FilterConfig:
     max_features_per_update: int = 50
     pixel_sigma: float = 1.0
     chi2_probability: float = 0.95
-    min_parallax_deg: float = 1.0
     min_depth_m: float = 0.2
     max_depth_m: float = 40.0
     max_reprojection_px: float = 3.0
@@ -336,11 +335,12 @@ class MSCKF:
         if np.any(pc[:, 2] <= c.min_depth_m) or np.any(pc[:, 2] >= c.max_depth_m):
             return None
         reprojection = np.linalg.norm(z - pc[:, :2] / pc[:, 2:], axis=1) * self.camera.focal
+        # No minimum parallax. While the drone hovers every track has almost
+        # none, and those tracks are what keeps the velocity from drifting
+        # (MH_04 drifted 7 m in a 10 s hover with a 1 deg threshold). Bad
+        # triangulations are caught by the depth and reprojection checks
+        # above and by the chi-squared test.
         if np.any(reprojection > c.max_reprojection_px):
-            return None
-        rays = f - p_WC
-        rays /= np.linalg.norm(rays, axis=1, keepdims=True)
-        if np.degrees(np.arccos(np.clip(np.min(rays @ rays.T), -1.0, 1.0))) < c.min_parallax_deg:
             return None
         return f
 

@@ -28,8 +28,7 @@ step "takeoff detection and preflight gyro bias"
 python scripts/detect_takeoff.py --euroc "$EUROC" || echo "takeoff detection failed; continuing"
 python scripts/detect_takeoff.py --euroc "$EUROC" --sequences V2_01_easy --video || true
 
-step "gyro and GRU noise, measured on MH_05"
-python scripts/train_gru.py calibrate --euroc "$EUROC" --out models/gyro_calibrated.json
+step "GRU noise, measured on MH_05"
 python scripts/train_gru.py calibrate --euroc "$EUROC" --checkpoint models/gru_preflight.pt \
     --out models/gru_preflight_cal.pt --report results/gru/calibration_gru_preflight.json
 
@@ -37,13 +36,15 @@ step "fine-tuning the GRU for use inside the filter"
 python scripts/train_gru.py train --euroc "$EUROC" --init models/gru_preflight.pt --out models/gru_filter.pt
 python scripts/train_gru.py calibrate --euroc "$EUROC" --checkpoint models/gru_filter.pt \
     --out models/gru_filter_cal.pt --report results/gru/calibration_gru_filter.json
+python scripts/train_gru.py compare --euroc "$EUROC" \
+    original=models/gru_preflight.pt fine-tuned=models/gru_filter.pt
 
 step "MSCKF on all sequences ($JOBS parallel runs)"
-python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-cal gru-preflight gru-filter --jobs "$JOBS"
+python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-gru-noise gru-preflight gru-filter --jobs "$JOBS"
 
 step "camera outages on V2"
 # shellcheck disable=SC2086
-python scripts/run_vio.py --euroc "$EUROC" --variant msckf-cal gru-preflight gru-filter \
+python scripts/run_vio.py --euroc "$EUROC" --variant msckf msckf-gru-noise gru-preflight gru-filter \
     --sequences $V2 --outage 1 2 5 --jobs "$JOBS"
 
 step "scoring"

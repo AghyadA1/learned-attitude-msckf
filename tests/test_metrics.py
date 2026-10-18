@@ -29,3 +29,24 @@ def test_first_pose_alignment():
     Rf, tf = metrics.align_first_pose(R_est0, np.zeros(3), R_gt0, np.array([1.0, 2.0, 3.0]))
     np.testing.assert_allclose(Rf, Rz, atol=1e-10)
     np.testing.assert_allclose(tf, [1, 2, 3], atol=1e-12)
+
+
+def test_outages_outside_groundtruth_are_skipped():
+    from qvio.euroc import GroundTruth
+
+    n = 200
+    t = np.arange(n, dtype=np.int64) * 50_000_000
+    p = np.column_stack([np.linspace(0, 10, n), np.zeros(n), np.zeros(n)])
+    q = np.tile([0.0, 0.0, 0.0, 1.0], (n, 1))
+    gt = GroundTruth(t=t[20:], p=p[20:], q=q[20:], v=np.zeros((n - 20, 3)),
+                     bg=np.zeros((n - 20, 3)), ba=np.zeros((n - 20, 3)))
+    hidden = np.zeros(n, bool)
+    hidden[5:15] = True      # before ground truth starts
+    hidden[100:120] = True
+    drifted = p.copy()
+    drifted[100:120, 1] += 0.3
+    run = {"t": t, "p": drifted, "q": q, "hidden": hidden}
+    rows = metrics.evaluate_outages(run, gt)
+    assert len(rows) == 1
+    np.testing.assert_allclose(rows[0]["translation_drift_m"], 0.3, atol=1e-9)
+    np.testing.assert_allclose(rows[0]["start_s"], 99 * 0.05)

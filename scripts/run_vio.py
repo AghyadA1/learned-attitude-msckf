@@ -1,23 +1,22 @@
 """Run the MSCKF on EuRoC sequences, with or without the learned gyro model.
 
 Variants
-  msckf          plain gyro, noise densities from sensor.yaml
-  msckf-cal      plain gyro, per-window noise measured on MH_05 (fair baseline
-                 for the GRU variants, which also get MH_05-measured noise)
-  gru-preflight  the original network (trained with the preflight bias)
-  gru-filter     the network fine-tuned with ground-truth bias + variance head
+  msckf            plain gyro, noise densities from sensor.yaml
+  msckf-gru-noise  plain gyro, but with the per-window noise measured for the
+                   fine-tuned GRU on MH_05: the control for the GRU variants
+  gru-preflight    the original network (trained with the preflight bias)
+  gru-filter       the network fine-tuned with ground-truth bias + variance head
 
 With --outage D the camera is switched off for D seconds every 10 s, starting
 15 s after initialisation; the tracker restarts after each gap.
 
   python scripts/run_vio.py --euroc DATA --variant msckf gru-filter --jobs 4
-  python scripts/run_vio.py --euroc DATA --variant msckf-cal gru-filter --outage 2 --sequences V2_01_easy
+  python scripts/run_vio.py --euroc DATA --variant msckf-gru-noise gru-filter --outage 2 --sequences V2_01_easy
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -36,23 +35,34 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from qvio import euroc, pipeline  # noqa: E402
+from qvio.gru import WINDOW  # noqa: E402
 
 MODELS = ROOT / "models"
 VARIANTS = {
     "msckf": None,
-    "msckf-cal": MODELS / "gyro_calibrated.json",
+    "msckf-gru-noise": MODELS / "gru_filter_cal.pt",
     "gru-preflight": MODELS / "gru_preflight_cal.pt",
     "gru-filter": MODELS / "gru_filter_cal.pt",
 }
 
 
-class CalibratedGyro:
-    """Plain gyro with a measured per-window noise; no rate correction."""
+class GRUNoiseOnly:
+    """Plain gyro with the noise measured for a GRU checkpoint; no rate correction.
 
-    def __init__(self, path: Path):
-        self.window_variance = np.asarray(json.loads(Path(path).read_text())["window_variance_rad2"])
+    It separates the two things a GRU variant changes: the rotation over each
+    interval and the gyro noise the filter assumes.
+    """
+
+    def __init__(self, checkpoint: Path):
+        import torch
+
+        ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        self.window_variance = np.asarray(ck["window_variance"], float)
 
     def correction(self, t, gyro, accel, bias):
+        # Same intervals as the GRU uses; the others keep the sensor.yaml noise.
+        if len(t) != WINDOW + 1 or abs((t[-1] - t[0]) * 1e-9 - 0.05) > 0.002:
+            return None
         return np.zeros(3), self.window_variance
 
 
@@ -62,8 +72,8 @@ def gyro_model(variant: str):
         return None
     if not path.is_file():
         raise FileNotFoundError(f"{path} is missing; run the calibration step first (see README)")
-    if path.suffix == ".json":
-        return CalibratedGyro(path)
+    if variant == "msckf-gru-noise":
+        return GRUNoiseOnly(path)
     import torch
 
     torch.set_num_threads(1)
