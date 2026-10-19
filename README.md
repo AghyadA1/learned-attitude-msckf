@@ -221,10 +221,12 @@ whole-flight error (0.63 m against 1.26 m for `msckf`).
 With 10 s gaps the velocity GRU cuts the median drift from 2.29 m to
 1.84 m (20%), the worst 10% from 3.5 m to 2.9 m, and the whole-flight
 error from 1.80 m to 1.40 m. The speed-prior control does as well here
-(1.87 m), so at 10 s on V2 the gain cannot be credited to what the network
-learned, only to bounding the velocity at all. With both GRUs the median is
-lower again (1.54 m), but the worst gaps and the whole-flight error are
-not.
+(1.87 m), so at this rate the gain at 10 s on V2 cannot be credited to
+what the network learned, only to bounding the velocity at all. Applied
+twice a second, the network is ahead of the prior at 10 s (see
+[Once or twice a second](#once-or-twice-a-second)). With both GRUs the
+median is lower again (1.54 m), but the worst gaps and the whole-flight
+error are not.
 
 The gyro GRU on its own does not help in outages: with 5 s and 10 s gaps
 `gru-preflight` and `gru-filter` drift more than `msckf`.
@@ -329,7 +331,7 @@ given to the network separately:
   filter counted as independent, which made it too sure of its velocity.
   The rate was chosen on the cross-room test below (machine-hall network on
   V1), where once a second gave the lower median drift at both 5 s and
-  10 s.
+  10 s. Both rates are compared [below](#once-or-twice-a-second).
   Training the three networks takes under an hour on a CPU, and the
   trained ensemble is in [`models/velocity_gru.pt`](models/velocity_gru.pt).
 
@@ -386,6 +388,46 @@ filter's velocity uncertainty when the camera comes back (more divergence,
 probably because monocular vision then settles on a wrong scale), and
 continuing the velocity measurements for a few seconds after the camera
 returns (no change).
+
+### Once or twice a second
+
+The rate of the velocity measurements during a gap trades two things.
+Twice a second gives the filter more measurements, but each one shares
+half its IMU window with the one before, and the filter treats their
+errors as independent. The same runs as above, with the network and its
+control applied every 10 frames instead of every 20:
+
+| flights | variant | rate | 5 s median | 10 s median | 10 s, 90th pct. | 10 s, whole flight |
+|---|---|---|---|---|---|---|
+| V2 | `msckf-speed-prior` | once | **0.63 m** | 1.87 m | **2.82 m** | 1.43 m |
+| V2 | `msckf-speed-prior` | twice | 0.66 m | 2.14 m | 2.91 m | 1.83 m |
+| V2 | `gru-velocity` | once | 0.65 m | 1.84 m | 2.91 m | 1.40 m |
+| V2 | `gru-velocity` | twice | 0.71 m | **1.71 m** | 2.97 m | **1.31 m** |
+| V1, machine-hall network | `msckf-speed-prior` | once | 0.43 m | **1.17 m** | 2.50 m | 1.52 m |
+| V1, machine-hall network | `msckf-speed-prior` | twice | 0.43 m | 1.45 m | 2.14 m | 1.66 m |
+| V1, machine-hall network | `gru-velocity` | once | **0.41 m** | 1.24 m | 2.10 m | 1.18 m |
+| V1, machine-hall network | `gru-velocity` | twice | 0.43 m | 1.56 m | **1.86 m** | **1.12 m** |
+
+Each rate has its own strength:
+
+- **Once a second** is best for 5 s gaps. The network drifts less than
+  the speed prior in 63% of the 5 s gaps on V2 and 62% on V1. Twice a
+  second that falls to 47% and 55%, about even.
+- **Twice a second** is where the network most clearly beats the prior
+  over 10 s gaps. On V2 the prior gets worse when applied twice as often
+  (median 1.87 to 2.14 m, whole flight 1.43 to 1.83 m), probably because a
+  guess of zero, counted twice, pulls harder towards zero while the drone is
+  moving. The network gets better (1.84 to 1.71 m, and 1.40 to 1.31 m),
+  so its measurements carry information about the actual velocity rather
+  than only bounding it. Its median is then 20% below the prior's and its whole-flight error
+  29% below. On V1 its worst gaps (1.86 m) and whole-flight error (1.12 m)
+  are the lowest of all four, although the prior keeps the lower median.
+
+Once a second stays the default because it was chosen before the V2
+results were seen. The numbers are in
+[`results/twice_per_second/outages_summary.md`](results/twice_per_second/outages_summary.md)
+and
+[`results/cross_room_twice_per_second/outages_summary.md`](results/cross_room_twice_per_second/outages_summary.md).
 
 ## How the gyro GRU is used inside the filter
 
@@ -534,8 +576,9 @@ tests/          unit tests and a simulated flight
   looked at during the wider project, so it is a held-out test set rather
   than an untouched one.
 - The velocity GRU's gains in outages are small at 5 s (a few centimetres
-  per gap), and at 10 s on V2 a zero-velocity prior does as well. The
-  network has a flight-long bias on V2. Without the velocity reset after
+  per gap), and at 10 s on V2 a zero-velocity prior does as well when both
+  are applied once a second. Twice a second the network is ahead at 10 s
+  but not at 5 s. The network has a flight-long bias on V2. Without the velocity reset after
   each gap, the filter diverges on V2_03 with 5 s gaps, with or without
   the network.
 - The filter is monocular and written for clarity, not speed. It is slower
