@@ -9,7 +9,7 @@ To use them, copy both folders into a checkout of `main`:
 
 ```bash
 git fetch origin runs
-git archive origin/runs runs cache | tar -x
+git archive FETCH_HEAD runs cache | tar -x
 ```
 
 `scripts/reproduce.sh` then skips every filter run and goes straight to
