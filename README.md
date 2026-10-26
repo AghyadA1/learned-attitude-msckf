@@ -496,7 +496,7 @@ seeds the average attitude and position NEES are 2.9 and 3.2, close to the
 Python 3.10 or newer. A CPU is enough, including for the GRU fine-tuning.
 
 ```bash
-git clone https://github.com/AghyadA1/learned-attitude-msckf.git
+git clone --single-branch https://github.com/AghyadA1/learned-attitude-msckf.git
 cd learned-attitude-msckf
 pip install -e ".[gru,dev]"
 pytest -q
@@ -547,15 +547,14 @@ python scripts/evaluate.py --euroc data/euroc
 unchanged (SHA-256 `bfd22f8e…4bc3`).
 
 **Without running the filter.** The filter runs behind every table (one
-`.npz` per variant and flight, 510 MB) and the cached feature tracks
-(160 MB) are attached to the
-[`runs-2026-10-18`](https://github.com/AghyadA1/learned-attitude-msckf/releases/tag/runs-2026-10-18)
-release. Unpacked in the repository folder, they let `reproduce.sh` skip
-every filter run and go straight to scoring:
+`.npz` per variant and flight, 490 MB) and the cached feature tracks
+(150 MB) are on the separate `runs` branch, so a normal clone of `main`
+does not download them. Copied into the repository folder, they let
+`reproduce.sh` skip every filter run and go straight to scoring:
 
 ```bash
-tar -xf runs.tar      # runs/
-tar -xf tracks.tar    # cache/tracks/
+git fetch origin runs
+git archive origin/runs runs cache | tar -x
 ```
 
 ## Layout
