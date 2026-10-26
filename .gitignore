@@ -10,7 +10,3 @@ runs/
 data/
 logs/
 
-# Models produced by scripts/reproduce.sh (the original checkpoint is tracked).
-models/gru_preflight_cal.pt
-models/gru_filter.pt
-models/gru_filter_cal.pt

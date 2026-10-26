@@ -29,14 +29,22 @@ step "takeoff detection and preflight gyro bias"
 python scripts/detect_takeoff.py --euroc "$EUROC" || echo "takeoff detection failed; continuing"
 python scripts/detect_takeoff.py --euroc "$EUROC" --sequences V2_01_easy --video || true
 
+# The calibrated and fine-tuned networks are in the repository; delete them
+# to make them again.
 step "GRU noise, measured on MH_05"
-python scripts/train_gru.py calibrate --euroc "$EUROC" --checkpoint models/gru_preflight.pt \
-    --out models/gru_preflight_cal.pt --report results/gru/calibration_gru_preflight.json
+if [ ! -f models/gru_preflight_cal.pt ]; then
+    python scripts/train_gru.py calibrate --euroc "$EUROC" --checkpoint models/gru_preflight.pt \
+        --out models/gru_preflight_cal.pt --report results/gru/calibration_gru_preflight.json
+fi
 
 step "fine-tuning the GRU for use inside the filter"
-python scripts/train_gru.py train --euroc "$EUROC" --init models/gru_preflight.pt --out models/gru_filter.pt
-python scripts/train_gru.py calibrate --euroc "$EUROC" --checkpoint models/gru_filter.pt \
-    --out models/gru_filter_cal.pt --report results/gru/calibration_gru_filter.json
+if [ ! -f models/gru_filter.pt ]; then
+    python scripts/train_gru.py train --euroc "$EUROC" --init models/gru_preflight.pt --out models/gru_filter.pt
+fi
+if [ ! -f models/gru_filter_cal.pt ]; then
+    python scripts/train_gru.py calibrate --euroc "$EUROC" --checkpoint models/gru_filter.pt \
+        --out models/gru_filter_cal.pt --report results/gru/calibration_gru_filter.json
+fi
 python scripts/train_gru.py compare --euroc "$EUROC" \
     original=models/gru_preflight.pt fine-tuned=models/gru_filter.pt
 

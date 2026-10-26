@@ -521,9 +521,10 @@ bash scripts/reproduce.sh data/euroc
 
 This checks the data, runs the tests, detects takeoff, calibrates and
 fine-tunes the gyro GRU, scores the velocity GRU, runs every filter variant
-on all sequences plus the V2 outage runs, and scores them. The velocity GRU
-is only trained again if `models/velocity_gru.pt` is missing. Finished runs are skipped, so it can be
-restarted. `JOBS=4` sets the number of parallel filter runs. If you have
+on all sequences plus the V2 outage runs, and scores them. All trained
+networks are in `models/`, and a network is only trained or calibrated again
+if its file is missing. Finished runs are skipped, so it can be restarted.
+`JOBS=4` sets the number of parallel filter runs. If you have
 OpenVINS exports, pass their folder as a second argument to score them with
 the same code.
 
@@ -544,6 +545,18 @@ python scripts/evaluate.py --euroc data/euroc
 
 `models/gru_preflight.pt` is the trained network from the original project,
 unchanged (SHA-256 `bfd22f8e…4bc3`).
+
+**Without running the filter.** The filter runs behind every table (one
+`.npz` per variant and flight, 510 MB) and the cached feature tracks
+(160 MB) are attached to the
+[`runs-2026-10-18`](https://github.com/AghyadA1/learned-attitude-msckf/releases/tag/runs-2026-10-18)
+release. Unpacked in the repository folder, they let `reproduce.sh` skip
+every filter run and go straight to scoring:
+
+```bash
+tar -xf runs.tar      # runs/
+tar -xf tracks.tar    # cache/tracks/
+```
 
 ## Layout
 
