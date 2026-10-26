@@ -554,7 +554,7 @@ does not download them. Copied into the repository folder, they let
 
 ```bash
 git fetch origin runs
-git archive origin/runs runs cache | tar -x
+git archive FETCH_HEAD runs cache | tar -x
 ```
 
 ## Layout
