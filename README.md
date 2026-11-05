@@ -5,8 +5,13 @@ On the EuRoC MAV test flights it is **38% more accurate than OpenVINS**, and it
 **keeps tracking through camera outages** that make a standard filter diverge.
 
 <p align="center">
-  <img src="results/vio/trajectories_v2.png" width="100%" alt="Estimated and true trajectories on the three V2 test flights">
+  <img src="results/vio/outage_error_over_time.png" width="100%" alt="Position error over time with repeated camera outages: the standard filter drifts to tens or hundreds of metres, the improved filter stays within a few metres">
 </p>
+
+*With the camera switched off again and again (grey bands), a standard
+filter loses track and its error climbs to tens or hundreds of metres. The
+velocity recovery (top) and the velocity GRU (bottom, a network trained in a
+different room) keep it within a few metres.*
 
 ## Highlights
 
@@ -20,6 +25,8 @@ On the EuRoC MAV test flights it is **38% more accurate than OpenVINS**, and it
 
 Everything starts from a cold start: the filter finds its own still period,
 gravity and biases, and uses no ground truth at run time.
+The OpenVINS baseline is run and scored with the same code, the trained
+networks are included, and one script reproduces every table.
 
 <p align="center">
   <img src="docs/media/takeoff_v2_01.gif" width="49%" alt="Takeoff detection on V2_01">
@@ -67,6 +74,10 @@ position.
 |---|---|---|
 | OpenVINS v2.7 | 0.143 m | 1.41° |
 | this filter | **0.088 m** | **1.31°** |
+
+<p align="center">
+  <img src="results/vio/trajectories_v2.png" width="100%" alt="Estimated and true trajectories on the three V2 test flights">
+</p>
 
 **Camera switched off for 10 s, repeatedly** (median drift per outage)
 
@@ -156,6 +167,7 @@ python scripts/train_velocity.py evaluate --euroc data/euroc --checkpoint models
 python scripts/run_vio.py --euroc data/euroc --variant msckf gru-filter --sequences V2_01_easy
 python scripts/run_vio.py --euroc data/euroc --variant msckf gru-velocity gru-both --outage 10 --sequences V2_01_easy
 python scripts/evaluate.py --euroc data/euroc
+python scripts/plot_outage_error.py --euroc data/euroc
 ```
 
 `models/gru_preflight.pt` is the trained network from the original project,
