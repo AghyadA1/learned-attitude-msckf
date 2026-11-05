@@ -96,5 +96,6 @@ python scripts/evaluate.py --euroc "$EUROC" --runs runs/cross_room --out results
 python scripts/evaluate.py --euroc "$EUROC" --runs runs/twice_per_second --out results/twice_per_second
 python scripts/evaluate.py --euroc "$EUROC" --runs runs/cross_room_twice_per_second \
     --out results/cross_room_twice_per_second
+python scripts/plot_outage_error.py --euroc "$EUROC"
 
 step "done; tables are in results/, the full log in logs/reproduce.log"
